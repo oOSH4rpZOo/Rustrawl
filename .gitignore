@@ -1,0 +1,8 @@
+/target
+/data
+
+# local editor and system noise
+.vscode/
+.idea/
+*.swp
+.DS_Store

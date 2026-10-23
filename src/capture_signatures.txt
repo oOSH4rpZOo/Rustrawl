@@ -1,0 +1,130 @@
+# rustrawl capture fingerprints — hand-written, one entry per line.
+#
+# Format:  frag1;frag2|Label
+#
+# Every fragment (`;`-separated) must appear — case-insensitively — in the
+# target's page title, HTTP headers, or the first 256 KiB of its body, so a
+# multi-fragment line is an AND, not an OR. The FIRST matching line wins;
+# keep specific entries above generic ones. Empty lines and `#` comments are
+# ignored. A fragment or label must not contain `|`.
+#
+# This table is written by hand for rustrawl, in the spirit of EyeWitness's
+# default-credential hunt: no other tool's signature files are copied here
+# (they are GPL and their wordings are theirs).
+
+# --- dev & app platforms ------------------------------------------------------
+x-jenkins|Jenkins CI
+apache tomcat|Apache Tomcat
+x-powered-by: servlet|Apache Tomcat (servlet engine)
+whitelabel error page|Spring Boot (Whitelabel error page)
+x-application-context|Spring Boot
+weblogic|Oracle WebLogic
+jboss|JBoss
+wildfly|WildFly
+glassfish|GlassFish
+websphere|IBM WebSphere
+
+# --- web servers, default pages ------------------------------------------------
+apache2 default page|Apache default page
+welcome to nginx|nginx default page
+iis windows|IIS default page
+microsoft-iis|Microsoft IIS
+it works!|Default web server page ("It works!")
+lighttpd|lighttpd
+
+# --- network gear ---------------------------------------------------------------
+pfsense|pfSense firewall
+opnsense|OPNsense firewall
+routeros|MikroTik RouterOS
+mikrotik|MikroTik router
+unifi|Ubiquiti UniFi controller
+ubnt|Ubiquiti device (default creds ubnt/ubnt)
+dd-wrt|DD-WRT router
+openwrt|OpenWrt router (LuCI)
+cisco systems|Cisco device
+big-ip|F5 BIG-IP load balancer
+fortigate|FortiGate firewall
+fortinet|Fortinet device
+sonicwall|SonicWall firewall
+sophos;login|Sophos appliance
+
+# --- out-of-band management -----------------------------------------------------
+idrac|Dell iDRAC
+integrated dell remote access|Dell iDRAC
+ilo web interface|HPE iLO
+integrated lights-out|HPE iLO
+supermicro|Supermicro IPMI/BMC
+megarac|AMI MegaRAC BMC
+openmanage|Dell OpenManage
+
+# --- printers -------------------------------------------------------------------
+hp jetdirect|HP printer (JetDirect)
+hp laserjet|HP LaserJet printer
+hp pagewide|HP PageWide printer
+xerox;printer|Xerox printer
+brother;printer|Brother printer
+imagerunner|Canon imageRUNNER printer
+canon;printer|Canon printer
+epson;printer|Epson printer
+kyocera;printer|Kyocera printer
+ricoh;printer|Ricoh printer
+lexmark|Lexmark printer
+zebra technologies|Zebra printer
+
+# --- cameras & NVR ---------------------------------------------------------------
+hikvision|Hikvision camera/NVR
+dahua|Dahua camera/NVR
+axis communications|Axis camera
+reolink|Reolink camera
+foscam|Foscam camera
+uniview|Uniview camera/NVR
+
+# --- NAS & storage ----------------------------------------------------------------
+qnap|QNAP NAS
+diskstation|Synology DiskStation NAS
+synology|Synology NAS
+truenas|TrueNAS
+freenas|FreeNAS
+readynas|NETGEAR ReadyNAS
+minio|MinIO object storage
+
+# --- dashboards & admin UIs ---------------------------------------------------------
+grafana|Grafana dashboard
+kibana|Kibana dashboard
+splunk|Splunk
+zabbix|Zabbix monitoring
+nagios|Nagios monitoring
+prometheus time series|Prometheus server
+rabbitmq|RabbitMQ management
+you know, for search|Elasticsearch
+portainer|Portainer (Docker UI)
+kubernetes dashboard|Kubernetes dashboard
+rancher|Rancher
+harbor;registry|Harbor container registry
+nexus repository|Sonatype Nexus
+artifactory|JFrog Artifactory
+sonarqube|SonarQube
+metabase|Metabase BI
+node-red|Node-RED editor
+home assistant|Home Assistant
+proxmox|Proxmox VE
+vmware esxi|VMware ESXi
+vsphere|VMware vSphere
+veeam|Veeam backup
+guacamole|Apache Guacamole
+phpmyadmin|phpMyAdmin
+adminer|Adminer (DB UI)
+gitlab|GitLab
+gitea|Gitea
+jira|Atlassian Jira
+confluence|Atlassian Confluence
+freepbx|FreePBX
+
+# --- generic buckets (last: they only label what nothing specific matched) ----------
+www-authenticate: basic|HTTP Basic auth required
+www-authenticate: digest|HTTP Digest auth required
+401;unauthorized|HTTP 401 (auth required)
+403;forbidden|HTTP 403 (forbidden)
+404;not found|HTTP 404
+index of /|Directory listing
+login;password|Login page

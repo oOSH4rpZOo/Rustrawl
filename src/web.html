@@ -1,0 +1,1996 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rustrawl</title>
+<link rel="icon" href="/logo.png">
+<style>
+  /* White identity, the logo's own palette: navy #021e3b, orange #e23600. */
+  :root {
+    --bg: #ffffff; --soft: #f6f8fa; --fg: #24303c; --navy: #021e3b; --dim: #6b7885;
+    --line: #e3e8ee; --line2: #eef1f5; --zebra: #f8fafc;
+    --accent: #e23600; --accent-dark: #c22f00; --accent-soft: #fdeee7;
+    --ok: #1a8f4d; --warn: #b7791f; --red: #d13438;
+    --pwned: #111; /* the compromise mark: black in every theme and state */
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  /* The vertical banner: fixed on the left, it ignores scrolling and
+     keeps the logo big and the three views at hand. */
+  aside#side {
+    position: fixed; top: 0; left: 0; bottom: 0; width: 240px;
+    display: flex; flex-direction: column; gap: 20px;
+    padding: 24px 20px; border-right: 1px solid var(--line); background: var(--bg);
+    overflow-y: auto; /* a short window scrolls the column, the column stays put */
+  }
+  aside#side .logo { width: 100%; display: block; }
+  nav { display: flex; flex-direction: column; gap: 2px; }
+  nav a {
+    color: var(--dim); text-decoration: none; padding: 8px 12px;
+    border-radius: 8px; font: 500 13.5px -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  nav a:hover { color: var(--navy); background: var(--soft); }
+  nav a.active {
+    color: var(--navy); font-weight: 700; background: var(--soft);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  aside .perim {
+    margin-top: auto; color: var(--dim); font-family: var(--mono);
+    font-size: 11px; word-break: break-all;
+  }
+  main { margin-left: 240px; padding: 18px 24px 70px; }
+  .bar { display: flex; gap: 12px; align-items: center; margin: 0 0 12px; flex-wrap: wrap; }
+  /* Direct children only: a checkbox dropped in the bar must not inherit
+     the search input's 260px bordered-box look. */
+  .bar > input {
+    background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 8px; padding: 7px 12px; font-family: var(--mono);
+    font-size: 13px; min-width: 260px;
+  }
+  .count { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  .dim { color: var(--dim); }
+  .empty { color: var(--dim); font-family: var(--mono); padding: 26px 0; }
+
+  h2 {
+    font: 600 11.5px var(--mono); color: var(--dim); text-transform: uppercase;
+    letter-spacing: .09em; margin: 28px 0 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  h2::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--accent); flex: 0 0 auto; }
+
+  /* Fully delimited tables: outer border, header band, zebra rows. */
+  table {
+    border-collapse: separate; border-spacing: 0; width: 100%;
+    font-family: var(--mono); font-size: 13px;
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line2); white-space: nowrap; }
+  td.ver { white-space: normal; }
+  th {
+    color: var(--dim); cursor: pointer; user-select: none;
+    background: var(--soft); border-bottom: 1px solid var(--line); font-weight: 600;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  }
+  th.sorted { color: var(--accent); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:nth-child(even) td { background: var(--zebra); }
+  tr.click { cursor: pointer; }
+  tr.click:hover td { background: var(--accent-soft); }
+  .tscroll { overflow-x: auto; }
+
+  pre {
+    background: var(--soft); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; overflow-x: auto; font: 12.5px/1.55 var(--mono); color: var(--fg);
+  }
+
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 14px 0; }
+  .card {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 20px; min-width: 130px;
+  }
+  .card b { display: block; font: 600 24px var(--mono); color: var(--navy); }
+  .card span { color: var(--dim); font-size: 12px; }
+
+  /* The ranges home: one wide row per /24 - the range on the left, its
+     host and port counts on the right. A click opens the range's hosts. */
+  .rangelist { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .rangerow {
+    display: flex; align-items: center; gap: 18px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 13px 18px; cursor: pointer;
+    transition: border-color .12s ease, box-shadow .12s ease;
+  }
+  .rangerow:hover {
+    border-color: var(--navy); box-shadow: 0 3px 14px rgba(2, 30, 59, .10);
+  }
+  .rrname { font: 600 15px var(--mono); color: var(--navy); }
+  .rrstats { margin-left: auto; display: flex; gap: 26px; }
+  .rcstat b { display: block; font: 600 18px var(--mono); color: var(--fg); }
+  .rcstat span { color: var(--dim); font-size: 11px; }
+
+  /* The hosts list hides the no-port hosts behind a checkbox. */
+  label.hidewh {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    color: var(--dim); font-size: 12.5px; white-space: nowrap; user-select: none;
+  }
+  label.hidewh input {
+    width: 13px; height: 13px; min-width: 0; padding: 0; margin: 0;
+    border: none; border-radius: 0; background: none; accent-color: var(--accent);
+  }
+
+  /* The sheet header: back arrow, ip, hostnames, the pwned mark. */
+  .sheethead { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 4px 0 6px; }
+  .back {
+    color: var(--dim); text-decoration: none; font: 600 15px var(--mono);
+    padding: 2px 10px; border: 1px solid var(--line); border-radius: 8px;
+  }
+  .back:hover { color: var(--navy); border-color: var(--navy); }
+  .ship { font: 600 20px var(--mono); color: var(--navy); }
+  .shnames { color: var(--dim); font-family: var(--mono); font-size: 12.5px; }
+  .shpwn { color: var(--pwned); font-weight: 700; font-size: 16px; }
+
+  /* State marks: the round pastille (click cycles). One vocabulary, host
+     level: todo (orange), clean (green), vuln (red). */
+  .pastille {
+    width: 13px; height: 13px; border-radius: 50%; padding: 0;
+    border: 1px solid var(--line); background: var(--bg);
+    cursor: pointer; vertical-align: middle; display: inline-block;
+  }
+  .pastille:hover { transform: scale(1.25); }
+  .pastille.none:hover { border-color: var(--dim); }
+  .pastille.todo { background: var(--accent); border-color: var(--accent); }
+  .pastille.clean { background: var(--ok); border-color: var(--ok); }
+  .pastille.vuln { background: var(--red); border-color: var(--red); }
+  /* The pwned dot: hollow until marked, filled black once it is. A quiet
+     toggle in both directions, no confirm on either. */
+  .pwndot {
+    width: 12px; height: 12px; border-radius: 50%; padding: 0;
+    border: 1px solid var(--line); background: var(--bg);
+    cursor: pointer; vertical-align: middle; display: inline-block;
+  }
+  .pwndot:not(.on):hover { border-color: var(--pwned); }
+  /* Black, not red: beside the orange todo pastille a red dot did not
+     read as a different mark. Black is unambiguous - in every state,
+     hover included. */
+  .pwndot.on {
+    background: var(--pwned); border-color: var(--pwned);
+    box-shadow: 0 0 0 3px rgba(0, 0, 0, .12);
+  }
+
+  /* Tags and their editor chips. */
+  .tagchip {
+    display: inline-flex; align-items: center; gap: 5px; margin: 1px;
+    background: var(--soft); border: 1px solid var(--line); border-radius: 999px;
+    padding: 2px 9px; font: 11.5px var(--mono); color: var(--navy);
+  }
+  .tagchip button {
+    background: none; border: none; padding: 0; cursor: pointer;
+    font: 12px var(--mono); color: var(--dim);
+  }
+  .tagchip button:hover { color: var(--red); }
+  .tagadd { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .tagadd input {
+    width: 10em; background: var(--bg); border: 1px solid var(--line);
+    color: var(--fg); border-radius: 8px; padding: 3px 9px; font: 12px var(--mono);
+  }
+
+  button.chipbtn {
+    background: var(--bg); border: 1px solid var(--line); color: var(--dim);
+    border-radius: 8px; padding: 5px 15px; font: 12.5px var(--mono); cursor: pointer;
+  }
+  button.chipbtn:hover { border-color: var(--navy); color: var(--navy); }
+  button.chipbtn.on { border-color: var(--navy); color: var(--navy); background: var(--soft); font-weight: 700; }
+  button.chipbtn.on.todo { border-color: var(--accent); background: var(--accent); color: #fff; }
+  button.chipbtn.on.vuln { border-color: var(--red); background: var(--red); color: #fff; }
+  button.chipbtn.on.clean { border-color: var(--ok); background: var(--ok); color: #fff; }
+
+  textarea {
+    width: 100%; min-height: 64px; background: var(--bg);
+    border: 1px solid var(--line); color: var(--fg); border-radius: 10px;
+    padding: 10px 12px; font: 13px var(--mono); resize: vertical; margin: 8px 0;
+  }
+  .bar input:focus, .tagadd input:focus, .typeedit input:focus,
+  .scanrow input:focus, textarea:focus {
+    outline: none; border-color: var(--navy); box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  /* The note is written at length: the editor gets a tall page. */
+  .notebox textarea { min-height: 380px; }
+  button.save {
+    background: var(--accent); border: 1px solid var(--accent); color: #fff;
+    border-radius: 8px; padding: 6px 18px; font: 600 12.5px var(--mono); cursor: pointer;
+  }
+  button.save:hover { background: var(--accent-dark); border-color: var(--accent-dark); }
+  button.save:disabled { opacity: .55; cursor: default; }
+  /* The brake on a running rescan: quiet until needed, then loud. */
+  button.stopbtn {
+    background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 8px; padding: 6px 18px; font: 600 12.5px var(--mono); cursor: pointer;
+  }
+  button.stopbtn:hover { border-color: var(--red); color: var(--red); }
+  button.stopbtn:disabled { opacity: .45; cursor: default; }
+
+  /* The sheet's note: markdown source in the textarea, rendered preview in
+     the .md block. Screenshots land as plain <img>, sized to the sheet. */
+  .md {
+    background: var(--soft); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 16px; margin: 8px 0; overflow-x: auto;
+  }
+  .md p { margin: 6px 0; }
+  .md h3, .md h4, .md h5, .md h6 { margin: 12px 0 4px; color: var(--navy); }
+  .md ul { margin: 6px 0; padding-left: 22px; }
+  .md pre { margin: 8px 0; background: var(--bg); }
+  .md code {
+    font: 12px var(--mono); background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line2); border-radius: 4px; padding: 0 4px;
+  }
+  .md pre code { border: none; background: none; padding: 0; }
+  .md img {
+    display: block; max-width: 100%; margin: 6px 0;
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+
+  /* Kind and port badges; web ports are links. */
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 6px; margin: 1px;
+    border: 1px solid var(--line); background: var(--soft); font: 11px var(--mono);
+    color: var(--fg);
+  }
+  .badge.kind { border-color: #c9d7e6; color: var(--navy); background: #eef3f9; font-weight: 600; }
+  a.badge { color: var(--accent); text-decoration: none; border-color: #f4c7ae; background: var(--accent-soft); }
+  a.badge:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .triage { max-width: 640px; }
+  .triage .bar { margin-bottom: 8px; }
+  .typeedit input {
+    background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 8px; padding: 2px 8px; font: 12px var(--mono); width: 14em;
+  }
+  .typeedit button { margin-left: 6px; }
+  .typeedit { display: inline-flex; align-items: center; }
+
+  /* Manual rescan: free-form nmap args (the port list rides in them),
+     status below. */
+  .scanrow { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  .scanrow input {
+    background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 8px; padding: 6px 11px; font: 12px var(--mono);
+  }
+  .scanrow input#sargs, .scanrow input.args { flex: 1; min-width: 220px; }
+  .scanrow button { flex: 0 0 auto; }
+  .scanstat { display: block; color: var(--warn); font: 12px var(--mono); white-space: pre-wrap; }
+
+  /* The filter bar's export dropdown (right end): exports exactly what the
+     view displays — a filter leaving 10 rows exports those 10. Same box
+     look as the bar's input, the focus ring comes from :focus-visible. */
+  select.xsel {
+    background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 8px; padding: 7px 12px; font-family: var(--mono);
+    font-size: 13px; cursor: pointer;
+  }
+  select.xsel:hover { border-color: var(--navy); }
+  /* The rescan tab's live output: nmap's stdout as it writes, the page
+     pinned to the bottom of it. */
+  .outbox {
+    max-height: 60vh; overflow: auto; white-space: pre; text-align: left;
+  }
+  /* The prefix switcher on the ranges home: one row of chips. */
+  .switch { display: inline-flex; gap: 4px; }
+
+  /* The evidence stack: one collapsible block per scan run, newest open.
+     Native <details> does the collapsing - no JS. */
+  details.evblock {
+    border: 1px solid var(--line); border-radius: 10px;
+    margin: 8px 0; background: var(--bg); overflow: hidden;
+  }
+  details.evblock summary {
+    cursor: pointer; padding: 9px 13px; font: 600 13px var(--mono);
+    color: var(--navy); user-select: none; background: var(--soft);
+  }
+  details.evblock[open] summary { border-bottom: 1px solid var(--line); }
+  details.evblock pre { margin: 0; border: none; border-radius: 0; background: var(--bg); }
+  /* The captured nmap command line, above the captured output. */
+  .evcmd {
+    padding: 8px 13px 0; font: 11px/1.5 var(--mono);
+    color: var(--dim); word-break: break-all;
+  }
+  .evmiss { color: var(--warn); font-weight: 400; }
+  /* Capture tiles: the web face of a run — screenshot, url, title, label.
+     The image keeps a white ground so a blank page stays visible on the
+     dark theme too. */
+  .capgrid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 12px; margin: 12px 0;
+  }
+  .captile {
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+    display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  }
+  .captile img {
+    width: 100%; height: auto; border-radius: 4px;
+    border: 1px solid var(--line); background: #fff;
+  }
+  .capurl { font: 12px/1.4 var(--mono); color: var(--navy); word-break: break-all; }
+  .captitle { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .caplabel {
+    font: 11px/1.5 var(--mono); color: var(--navy); background: var(--soft);
+    padding: 1px 8px; border-radius: 9px; align-self: flex-start;
+  }
+  .caperr {
+    font: 11px/1.5 var(--mono); color: var(--red); padding: 18px 6px;
+    text-align: center; border: 1px dashed var(--line); border-radius: 4px;
+  }
+  .capdup, .caprun { font: 11px/1.5 var(--mono); color: var(--dim); word-break: break-all; }
+  .capheaders summary { cursor: pointer; font: 11px/1.5 var(--mono); color: var(--dim); }
+  .capheaders pre {
+    font: 11px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all;
+    margin: 6px 0 0;
+  }
+
+  ::selection { background: var(--navy); color: #fff; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* Narrow screens: the banner folds back into a plain top bar. */
+  @media (max-width: 900px) {
+    aside#side {
+      position: static; width: auto; flex-direction: row; align-items: center;
+      gap: 12px; padding: 10px 14px; border-right: none;
+      border-bottom: 1px solid var(--line);
+    }
+    aside#side .logo { width: 34px; }
+    nav { flex-direction: row; margin-left: auto; }
+    aside .perim { display: none; }
+    main { margin-left: 0; padding: 12px 14px 60px; }
+    th, td { padding: 6px 8px; }
+  }
+</style>
+</head>
+<body>
+<aside id="side">
+  <img class="logo" src="/logo.png" alt="rustrawl">
+  <nav>
+    <a href="#/ranges" id="tab-ranges">ranges</a>
+    <a href="#/services" id="tab-services">services</a>
+    <a href="#/hosts" id="tab-hosts">hosts</a>
+    <a href="#/rescan" id="tab-rescan">rescan</a>
+    <a href="#/capture" id="tab-capture">capture</a>
+  </nav>
+  <span class="perim" id="perim"></span>
+</aside>
+<main id="view"></main>
+<script>
+"use strict";
+const $view = document.getElementById("view");
+let filter = "";
+// Hosts without a single open port stay out of the list until the box
+// asks for them (the switch is on by default).
+let hideNoPort = true;
+// The ranges home's bucket size. Lives in the URL hash as /ranges/p16 so
+// a widened view survives a reload and a share; the bare forms
+// (#/ranges, #/ranges/<filter>) keep meaning /24.
+let rangePrefix = 24;
+// Sort state lives per table (dataTable id → {key, dir}): the host sheet
+// shows two tables at once, and one shared key would sort one table
+// against the other's columns and crash the render.
+const sortState = {};
+// Render token: only the most recently claimed render may paint. A slow
+// fetch (keystroke spam, a route change mid-flight) must never overwrite
+// the view a newer render already filled.
+let renderSeq = 0;
+const claim = () => ++renderSeq;
+const live = seq => seq === renderSeq;
+// Where the operator came from: the sheet's back arrow returns to the
+// previous view (ranges, a filtered hosts list), not to a fixed page.
+let prevHash = null, curHash = null;
+// The rescan tab's queue and its live run. rescanHosts is the recap every
+// entry point fills (the ranges chip, the hosts/services bar button, the
+// sheet's button); entries accumulate until the operator clears them, and
+// the queue survives page reloads through localStorage. The rest tracks the
+// running nmap so navigating away and back recovers the output — the page
+// keeps the tail in memory, the server keeps it keyed to the newest manual
+// run.
+const RESCAN_QUEUE_KEY = "rustrawl-rescan-queue";
+function isIpv4(v) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v);
+  return !!m && m.slice(1).every(o => +o <= 255);
+}
+function loadRescanQueue() {
+  try {
+    const q = JSON.parse(localStorage.getItem(RESCAN_QUEUE_KEY));
+    return Array.isArray(q) ? q.filter(h => typeof h === "string" && isIpv4(h)) : [];
+  } catch { return []; }
+}
+function saveRescanQueue() {
+  try { localStorage.setItem(RESCAN_QUEUE_KEY, JSON.stringify(rescanHosts)); } catch {}
+}
+function queueHosts(list) {
+  rescanHosts = [...new Set([...rescanHosts, ...list])];
+  saveRescanQueue();
+}
+// The queue buttons stay on their page — the button itself says what it
+// did ("queued 12") for a beat, then its label comes back. A flash already
+// running wins; a re-render re-labeling the button simply overrides it.
+function flashQueued(btn, text) {
+  if (!btn || btn.dataset.flash) return;
+  const orig = btn.textContent;
+  btn.textContent = text;
+  btn.dataset.flash = "1";
+  setTimeout(() => { btn.textContent = orig; delete btn.dataset.flash; }, 1200);
+}
+let rescanHosts = loadRescanQueue();
+let rescanLogText = "", rescanFinal = null, rescanRunId = null, rescanArgsDefaults = null;
+let rescanTimer = null, rescanInFlight = false, rescanCmd = "";
+// What the services/hosts views displayed at their last render, in the
+// exact screen order (post-sort): the export dropdown and the rescan
+// button read these, so a filter leaving 10 rows exports those 10.
+let displayedSvc = [], displayedHosts = [];
+
+// The triage vocabulary: one mark per host, todo (orange) / clean (green)
+// / vuln (red), cycled none → todo → vuln → clean → none. Marks live on
+// the host level only.
+const STATES = ["todo", "vuln", "clean"];
+
+function fmtTime(epoch) {
+  if (!epoch) return "-";
+  const d = new Date(epoch * 1000);
+  return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
+}
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  if (cls) e.className = cls;
+  return e;
+}
+function card(val, label) {
+  const c = el("div", null, "card");
+  c.appendChild(el("b", val));
+  c.appendChild(el("span", label));
+  return c;
+}
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(path + " → HTTP " + r.status);
+  return r.json();
+}
+// A fetch that cannot reach the dashboard (server stopped, port drifted)
+// throws a bare TypeError whose text means nothing to anyone; every
+// user-facing error funnels through this first.
+function errText(e) {
+  return e instanceof TypeError ? "dashboard unreachable (server stopped?)" : String(e);
+}
+// The one write. `status`/`note` null keep the row's value (the server's
+// merge rule); status "none" clears the status, note "" erases the note.
+async function postTriage(ip, port, status, note) {
+  const r = await fetch("/api/triage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Rustrawl": "1" },
+    body: JSON.stringify({ ip, port, status, note }),
+  });
+  if (!r.ok) throw new Error("POST /api/triage → HTTP " + r.status);
+  return r.json();
+}
+// Sets or clears the host's asset type — the row the class editor's
+// POST writes. An empty kind clears (the classifier may guess again).
+async function postType(ip, kind) {
+  const r = await fetch("/api/type", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Rustrawl": "1" },
+    body: JSON.stringify({ ip, kind: kind === "" ? null : kind }),
+  });
+  if (!r.ok) throw new Error("POST /api/type → HTTP " + r.status);
+  return r.json();
+}
+// Flips a binary host flag — the dashboard's use is the pwned mark; the
+// server answers the flag's new state.
+async function postFlag(ip, flag, on) {
+  const r = await fetch("/api/" + flag, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Rustrawl": "1" },
+    body: JSON.stringify({ ip, on }),
+  });
+  if (!r.ok) throw new Error("POST /api/" + flag + " → HTTP " + r.status);
+  return r.json();
+}
+// Adds and removes tags on one host in one POST; the answer carries the
+// tags that remain (normalized server-side: lowercase, # stripped).
+async function postTags(ip, add, remove) {
+  const r = await fetch("/api/tag", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Rustrawl": "1" },
+    body: JSON.stringify({ ip, add, remove }),
+  });
+  if (!r.ok) throw new Error("POST /api/tag → HTTP " + r.status);
+  return r.json();
+}
+// The brake: flip the server's abort flag, the watch loop kills nmap
+// within its tick and the pending scan POST rejects with the interruption.
+async function postScanStop() {
+  const r = await fetch("/api/scan/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Rustrawl": "1" },
+    body: "{}",
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || "POST /api/scan/stop → HTTP " + r.status);
+  return r.json();
+}
+// The bulk shape of the write: an ips list (the rescan tab's queue). The
+// registry picks the targets, the args ride along; the response lands
+// when the rows do.
+async function postScanBatch(payload) {
+  const r = await fetch("/api/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Rustrawl": "1" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || "POST /api/scan → HTTP " + r.status);
+  return r.json();
+}
+// One asset's web face, re-shot now: the host sheet's capture button. Same
+// write shape as the rescan (guard header, the registry picks the targets);
+// the POST returns when the small run does.
+async function postCapture(payload) {
+  const r = await fetch("/api/capture", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Rustrawl": "1" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || "POST /api/capture → HTTP " + r.status);
+  return r.json();
+}
+// Range -> its up hosts: the ranges row's chip resolves its queue here
+// (a read — no guard header, like every GET).
+async function postUpIps(range) {
+  const r = await fetch("/api/up-ips", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ range }),
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || "POST /api/up-ips → HTTP " + r.status);
+  return r.json();
+}
+// A filtered export: POST exactly what the view displays (rows in screen
+// order, or the ips), download the response as a named file. A plain
+// POST on purpose — the exports are reads, no guard header.
+async function postExport(path, payload, name) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || "POST " + path + " → HTTP " + r.status);
+  const b = await r.blob();
+  const a = el("a");
+  a.href = URL.createObjectURL(b);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}
+// The filter bar's right-end dropdown. Built once into the cached bar;
+// picking an option runs its payload closure and snaps back to the
+// placeholder. The payload closures read the module row vars the render
+// refreshes, so what leaves is what is on screen.
+function exportSelect(bar, items) {
+  let sel = bar.querySelector(".xsel");
+  if (!sel) {
+    sel = el("select", null, "xsel");
+    const ph = el("option", "export ▾");
+    ph.disabled = true;
+    sel.appendChild(ph);
+    items.forEach(([label]) => {
+      const o = el("option", label);
+      o.value = label;
+      sel.appendChild(o);
+    });
+    sel.selectedIndex = 0;
+    sel.onchange = () => {
+      const it = items.find(([label]) => label === sel.value);
+      sel.selectedIndex = 0;
+      if (it) it[1]().catch(e => window.alert(errText(e)));
+    };
+    bar.appendChild(sel);
+  }
+}
+// The hosts/services bar's plain queue button: adds the displayed ips to
+// the rescan queue and stays on the page — the tab itself is reached from
+// the sidebar, its run button does the firing. No confirm here either.
+// Built once into the cached bar; the label follows the displayed count
+// each render.
+function queueRescanBtn(bar, ipsOf) {
+  let btn = bar.querySelector(".rescan-queue");
+  if (!btn) {
+    btn = el("button", "rescan", "chipbtn rescan-queue");
+    btn.title = "add these hosts to the rescan queue";
+    btn.onclick = () => {
+      const ips = [...new Set(ipsOf())];
+      if (!ips.length) return;
+      queueHosts(ips);
+      flashQueued(btn, "queued " + ips.length);
+    };
+    bar.insertBefore(btn, bar.querySelector(".count"));
+  }
+  const n = new Set(ipsOf()).size;
+  btn.textContent = "rescan " + n + " host" + (n === 1 ? "" : "s");
+  btn.disabled = !n;
+}
+// The pastille cycle: unset → todo → vuln → clean → unset. The unset step
+// posts status "none" (the API's null means "keep the current status" —
+// only the token clears it).
+function nextState(cur) {
+  if (!cur) return STATES[0];
+  const i = STATES.indexOf(cur);
+  return i < 0 || i + 1 >= STATES.length ? "none" : STATES[i + 1];
+}
+async function cycleState(ip, cur) {
+  try {
+    await postTriage(ip, 0, nextState(cur), null);
+  } catch (e) {
+    window.alert(errText(e));
+    return;
+  }
+  route();
+}
+
+// The pwned dot posts straight through in both directions — a mis-click
+// is undone by one more click, no confirm dialog.
+async function setFlag(ip, flag, on) {
+  try {
+    await postFlag(ip, flag, on);
+  } catch (e) {
+    window.alert(errText(e));
+    return;
+  }
+  route();
+}
+// One tag edit is add[] + remove[] in a single POST; the re-render picks
+// up the remaining tags.
+async function setTags(ip, add, remove) {
+  try {
+    await postTags(ip, add, remove);
+  } catch (e) {
+    window.alert(errText(e));
+    return;
+  }
+  route();
+}
+// The discrete pwned dot: hollow until the host is marked, filled black
+// once it is.
+function pwnedDot(ip, on) {
+  const b = el("button", null, "pwndot" + (on ? " on" : ""));
+  b.title = on ? "PW3ND, click to unmark" : "mark compromised (PW3ND)";
+  b.onclick = e => { e.stopPropagation(); setFlag(ip, "pwned", !on); };
+  return b;
+}
+// A tag chip: plain in the tables, with a remove cross in the editor.
+function tagChip(tag, onremove) {
+  const c = el("span", "#" + tag, "tagchip");
+  if (onremove) {
+    const x = el("button", "×");
+    x.title = "remove tag " + tag;
+    x.onclick = e => { e.stopPropagation(); onremove(); };
+    c.appendChild(x);
+  }
+  return c;
+}
+// The sheet's tag editor: one chip per tag (the cross removes), plus the
+// input (Enter or + adds). Normalization happens server-side; the empty
+// input adds nothing.
+function tagEditor(ip, tags) {
+  const wrap = el("span", null, "tagadd");
+  (tags ?? []).forEach(t => wrap.appendChild(tagChip(t, () => setTags(ip, [], [t]))));
+  const input = el("input");
+  input.placeholder = "#dc, #adcs…";
+  input.maxLength = 40;
+  const add = () => {
+    const raw = input.value.trim();
+    if (!raw) return;
+    input.value = "";
+    setTags(ip, [raw], []);
+  };
+  const plus = el("button", "+", "chipbtn");
+  plus.title = "add the tag";
+  plus.onclick = add;
+  input.onkeydown = e => { if (e.key === "Enter") add(); };
+  wrap.appendChild(input);
+  wrap.appendChild(plus);
+  return wrap;
+}
+// The sheet's note: the browser's own textarea for the markdown source, a
+// preview toggle over the same text, and the screenshot paste. A pasted
+// image uploads at once and slides in at the cursor as
+// ![shot](/notes/<ip>/<file>); the save is the same triage POST as before.
+function noteSection(ip, initial) {
+  const wrap = el("div", null, "notebox");
+  const tools = el("div", null, "bar");
+  const editBtn = el("button", "edit", "chipbtn");
+  const prevBtn = el("button", "preview", "chipbtn");
+  const slot = el("div");
+  const ta = el("textarea");
+  ta.value = initial;
+  ta.rows = 18;
+  ta.placeholder = "markdown: ## heading, **bold**, - list, `code`, ![shot](/notes/…) - paste a screenshot to attach it";
+  const save = el("button", "save note", "save");
+  save.onclick = async () => {
+    try { await postTriage(ip, 0, null, ta.value); } catch (e) { window.alert(errText(e)); return; }
+    route();
+  };
+  // Paste: one image in the clipboard uploads immediately (text pastes
+  // stay untouched), then the markdown reference lands at the cursor.
+  ta.onpaste = async e => {
+    const item = [...(e.clipboardData?.items ?? [])].find(i => i.type.startsWith("image/"));
+    if (!item) return;
+    e.preventDefault();
+    const file = item.getAsFile();
+    if (!file) return;
+    const hint = el("span", " uploading shot…", "dim");
+    ta.after(hint);
+    try {
+      const r = await fetch("/api/note-image/" + ip, {
+        method: "POST",
+        headers: { "Content-Type": item.type, "X-Rustrawl": "1" },
+        body: await file.arrayBuffer(),
+      });
+      if (!r.ok) throw new Error((await r.text()).trim() || ("HTTP " + r.status));
+      const v = await r.json();
+      const at = ta.selectionStart ?? ta.value.length;
+      const lead = at > 0 && ta.value[at - 1] !== "\n" ? "\n\n" : "";
+      ta.setRangeText(lead + "![" + v.file + "](" + v.url + ")\n", at, ta.selectionEnd ?? at, "end");
+    } catch (err) {
+      window.alert(String(err));
+    } finally {
+      hint.remove();
+    }
+  };
+  const setMode = edit => {
+    editBtn.classList.toggle("on", edit);
+    prevBtn.classList.toggle("on", !edit);
+    if (edit) { slot.replaceChildren(ta); return; }
+    const d = el("div", null, "md");
+    renderMarkdown(d, ta.value);
+    slot.replaceChildren(d);
+  };
+  editBtn.onclick = () => setMode(true);
+  prevBtn.onclick = () => setMode(false);
+  tools.appendChild(editBtn);
+  tools.appendChild(prevBtn);
+  wrap.appendChild(tools);
+  wrap.appendChild(slot);
+  const saveline = el("div", null, "bar");
+  saveline.appendChild(save);
+  wrap.appendChild(saveline);
+  setMode(true);
+  return wrap;
+}
+// A deliberately small markdown subset, rendered with createElement and
+// textContent only — the note text never meets innerHTML, so a hostile
+// note is just text. Headings, bullet lists, fenced code, bold, italic,
+// inline code, links (http(s) only), images (only the local /notes/
+// paths), paragraphs.
+function renderMarkdown(root, text) {
+  const lines = String(text ?? "").split("\n");
+  let i = 0;
+  const para = [];
+  const flush = () => {
+    if (!para.length) return;
+    const p = el("p");
+    inline(p, para.join(" "));
+    root.appendChild(p);
+    para.length = 0;
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith("```")) {
+      flush();
+      const body = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) { body.push(lines[i]); i++; }
+      i++; // the closing fence (or the end of the text)
+      const pre = el("pre");
+      pre.appendChild(el("code", body.join("\n")));
+      root.appendChild(pre);
+      continue;
+    }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      flush();
+      // the sheet's own section titles are h2: note headings start below
+      root.appendChild(el("h" + Math.min(h[1].length + 2, 6), h[2]));
+      i++;
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      flush();
+      const ul = el("ul");
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        const li = el("li");
+        inline(li, lines[i].replace(/^\s*[-*]\s+/, ""));
+        ul.appendChild(li);
+        i++;
+      }
+      root.appendChild(ul);
+      continue;
+    }
+    if (line.trim() === "") { flush(); i++; continue; }
+    para.push(line.trim());
+    i++;
+  }
+  flush();
+  // Inline pass: **bold**, *italic*, `code`, ![alt](/notes/…),
+  // [text](http…). One regex walk, every piece through textContent; an
+  // image only for the local notes paths, a link only for http(s).
+  function inline(node, text) {
+    const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|!\[[^\]]*\]\([^)]+\)|\[[^\]]+\]\([^)]+\))/g;
+    let last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) node.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const tok = m[0];
+      const im = tok.startsWith("![") && tok.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+      const lk = !im && tok.startsWith("[") && tok.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (im && im[2].startsWith("/notes/")) {
+        const img = el("img");
+        img.src = im[2];
+        img.alt = im[1] || "shot";
+        img.loading = "lazy";
+        node.appendChild(img);
+      } else if (lk && /^https?:\/\//i.test(lk[2])) {
+        const a = el("a", lk[1]);
+        a.href = lk[2];
+        a.target = "_blank";
+        a.rel = "noopener";
+        node.appendChild(a);
+      } else if (tok.startsWith("**")) {
+        node.appendChild(el("b", tok.slice(2, -2)));
+      } else if (tok.startsWith("*")) {
+        node.appendChild(el("i", tok.slice(1, -1)));
+      } else if (tok.startsWith("`")) {
+        node.appendChild(el("code", tok.slice(1, -1)));
+      } else {
+        node.appendChild(document.createTextNode(tok));
+      }
+      last = m.index + tok.length;
+    }
+    if (last < text.length) node.appendChild(document.createTextNode(text.slice(last)));
+  }
+}
+function cellNum(v) { return v === null || v === undefined ? "" : v; }
+
+// ---- mark widgets ------------------------------------------------------------
+function pastilleNode(status, onclick, title) {
+  const b = el("button", null, "pastille " + (status ?? "none"));
+  b.title = title ?? ("mark " + (status ?? "none") + " - click to cycle");
+  b.onclick = e => { e.stopPropagation(); onclick(); };
+  return b;
+}
+function kindNode(t) {
+  return t ? el("span", t.kind, "badge kind") : el("span", "-", "dim");
+}
+// The sheet's kind badge, clickable: swaps to a small editor (input +
+// save/cancel) that posts /api/type. An empty input clears the override.
+// The heuristic's basis rides in the tooltip, out of the header's way.
+function typeEditor(ip, t) {
+  const badge = kindNode(t);
+  badge.style.cursor = "pointer";
+  badge.title = (t
+    ? "class " + t.kind + (t.source === "manual" ? " - your override" : " - heuristic guess")
+      + "\n" + t.basis
+    : "no class yet") + " - click to set your own (empty input clears)";
+  badge.onclick = () => {
+    const box = el("span", null, "typeedit");
+    const input = el("input");
+    input.value = t ? t.kind : "";
+    input.placeholder = "class (bastion, voip…)";
+    input.maxLength = 32;
+    const save = el("button", "save", "save");
+    save.onclick = async () => {
+      try { await postType(ip, input.value.trim().toLowerCase()); } catch (e) { window.alert(errText(e)); return; }
+      route();
+    };
+    const cancel = el("button", "cancel", "chipbtn");
+    cancel.onclick = () => route();
+    input.onkeydown = e => { if (e.key === "Enter") save.onclick(); if (e.key === "Escape") cancel.onclick(); };
+    box.appendChild(input);
+    box.appendChild(save);
+    box.appendChild(cancel);
+    badge.replaceWith(box);
+    input.focus();
+  };
+  return badge;
+}
+// The scheme: name/ssl where the service name is known, otherwise the
+// well-known ports. Other ports render as plain badges.
+function svcUrl(ip, port, name) {
+  const n = String(name ?? "").toLowerCase();
+  if (n.includes("https") || n.includes("ssl") || port === 443 || port === 8443)
+    return "https://" + ip + ":" + port + "/";
+  // 8080 rides here so the page's idea of "web" matches the capture
+  // pass's classifier — the button below only offers what the pass takes.
+  if (n.includes("http") || port === 80 || port === 8080)
+    return "http://" + ip + ":" + port + "/";
+  return null;
+}
+function portBadge(ip, port, name) {
+  const url = svcUrl(ip, port, name);
+  if (url) {
+    const a = el("a", port, "badge");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.title = url;
+    return a;
+  }
+  return el("span", port, "badge");
+}
+
+// ---- generic sortable table -------------------------------------------------
+// The displayed order of a table: the filter's rows under the header's
+// sort (or the rows as given). dataTable paints this; the services/hosts
+// renders capture the same value for the export dropdown and the rescan
+// button, so "what the page shows" has one definition.
+function sortedRows(columns, rows, id) {
+  const st = sortState[id] ?? (sortState[id] = { key: null, dir: 1 });
+  const view = rows.slice();
+  if (st.key) {
+    const col = columns.find(c => c.key === st.key);
+    // The state belongs to this table alone; a key with no column here is
+    // stale - drop it instead of sorting against undefined.
+    if (!col) st.key = null;
+    else view.sort((a, b) => {
+      const va = col.val ? col.val(a) : a[st.key];
+      const vb = col.val ? col.val(b) : b[st.key];
+      if (col.numeric) return (Number(va) || 0) * st.dir - (Number(vb) || 0) * st.dir;
+      return String(va ?? "").localeCompare(String(vb ?? "")) * st.dir;
+    });
+  }
+  return view;
+}
+
+function dataTable(container, columns, rows, onRowClick, id) {
+  const st = sortState[id] ?? (sortState[id] = { key: null, dir: 1 });
+  const table = el("table");
+  const thead = el("thead"), trh = el("tr");
+  columns.forEach(c => {
+    const th = el("th", c.label);
+    if (st.key === c.key) { th.classList.add("sorted"); th.textContent = c.label + (st.dir > 0 ? " ▲" : " ▼"); }
+    th.onclick = () => {
+      if (st.key === c.key) { st.dir = -st.dir; } else { st.key = c.key; st.dir = 1; }
+      renderCurrent();
+    };
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh); table.appendChild(thead);
+  const tbody = el("tbody");
+  sortedRows(columns, rows, id).forEach(row => {
+    const tr = el("tr");
+    if (onRowClick) { tr.classList.add("click"); tr.onclick = () => onRowClick(row); }
+    columns.forEach(c => {
+      const td = el("td", null, c.cls);
+      const v = c.render ? c.render(row[c.key], row) : cellNum(row[c.key]);
+      if (v instanceof Node) td.appendChild(v);
+      else if (v !== undefined && v !== null) td.textContent = String(v);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  // Phones: the table scrolls sideways, the page never does.
+  const wrap = el("div", null, "tscroll");
+  wrap.appendChild(table);
+  container.appendChild(wrap);
+}
+
+// The filter bar is created once per view and kept in the DOM across
+// keystrokes — rebuilding it on every render dropped the focus (and the
+// caret) after the first character typed. `base` is the view's route: the
+// filter is written into the URL as it is typed (no history entry), so a
+// re-route — a pastille click, the sheet's back arrow — restores what the
+// operator typed instead of a stale hash.
+function filterBar(id, base, placeholder, apply, segFn) {
+  let bar = document.getElementById(id);
+  if (bar) return bar;
+  bar = el("div", null, "bar");
+  bar.id = id;
+  const input = el("input");
+  input.placeholder = placeholder;
+  const sync = () => {
+    filter = input.value;
+    // segFn lets a view carry extra hash state (the ranges home's
+    // /ranges/p16 prefix) without touching the filter contract.
+    const seg = segFn ? segFn() : "";
+    history.replaceState(null, "", "#" + base + (seg ? "/" + seg : "")
+      + (filter ? "/" + encodeURIComponent(filter) : ""));
+    apply();
+  };
+  input.oninput = sync;
+  input.onkeydown = e => { if (e.key === "Escape") { input.value = ""; sync(); } };
+  bar.appendChild(input);
+  bar.appendChild(el("span", "", "count"));
+  return bar;
+}
+
+// Paint rows under a bar that must stay put: drop only what sits below it.
+function showBelow(bar, node) {
+  if (!bar.isConnected) $view.replaceChildren(bar);
+  while (bar.nextSibling) bar.nextSibling.remove();
+  if (node) $view.appendChild(node);
+}
+
+// ---- the query language -----------------------------------------------------
+// A filter string is whitespace-separated tokens, all of which must match
+// (AND). `key:value` limits one field — port takes lists and inclusive
+// ranges (port:22,80,1000-2000); host/ip, name/service, version/info/banner
+// are substrings (quote a value to keep its spaces: name:"win rpc");
+// proto/protocol and state check the constant columns; state:/type: filter
+// the operator's triage marks and the asset types. A bare term is a
+// substring across the whole row. Edge rules: a keyed value that parses to
+// nothing (port:abc, port:500-80) matches NOTHING — a typo must hide every
+// row, not silently unfilter — and an empty quoted value (version:"")
+// matches rows whose field IS empty (the banners nmap could not name).
+function tokenize(q) {
+  const out = [];
+  for (const tok of q.match(/(?:[^\s"]+|"[^"]*")+/g) || []) {
+    const m = tok.match(/^([a-zA-Z]+):(.*)$/);
+    if (m) {
+      let val = m[2];
+      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+      out.push({ key: m[1].toLowerCase(), val });
+    } else {
+      out.push({ key: null, val: tok.replace(/"/g, "") });
+    }
+  }
+  return out;
+}
+
+function portRanges(spec) {
+  const ranges = [];
+  for (const piece of spec.split(",")) {
+    const m = piece.trim().match(/^(\d+)(?:-(\d+))?$/);
+    // One bad piece poisons the whole token: `port:22,1o00` must hide every
+    // row (a typo screams), not silently unfilter that piece. The CLI
+    // refuses the same input outright.
+    if (!m) return [];
+    const lo = Number(m[1]), hi = m[2] === undefined ? lo : Number(m[2]);
+    if (hi < lo) return [];
+    ranges.push([lo, hi]);
+  }
+  return ranges;
+}
+
+const hitPort = (port, ranges) => ranges.some(([lo, hi]) => port >= lo && port <= hi);
+const has = (text, v) => String(text ?? "").toLowerCase().includes(v);
+// A keyed empty value asks "the field is empty"; anything else is a
+// case-insensitive substring.
+const fieldHas = (text, v) => (v === "" ? String(text ?? "") === "" : has(text, v));
+// state:todo|clean|vuln needs that exact mark; state:none needs NO
+// mark at all; anything else matches nothing (a typo must not unfilter).
+const stateIs = (r, v) => (v === "none" ? !r.state : !!r.state && r.state.status === v);
+// type:dc needs that exact class; type:none needs NO type at all.
+const typeIs = (r, v) => (v === "none" ? !r.type : !!r.type && r.type.kind === v);
+// pwned:yes|no reads the compromise flag; on/off/1/0 are aliases, anything
+// else matches nothing (a typo must not unfilter).
+const flagIs = (mark, v) =>
+  ["yes", "on", "1"].includes(v) ? !!mark
+  : ["no", "off", "0", "none"].includes(v) ? !mark
+  : false;
+
+// The services view: rows carry ip/port/name/version (proto is the
+// constant "tcp" — the registry records open TCP services only; every row
+// is the scan's "open" verdict).
+function svcMatcher(q) {
+  const tokens = tokenize(q);
+  if (!tokens.length) return null;
+  return r => tokens.every(t => {
+    const v = t.val.toLowerCase();
+    const anywhere = () => has(r.ip, t.val) || has(r.name, v) || has(r.version, v)
+      || String(r.port).includes(t.val);
+    switch (t.key) {
+      case null: return anywhere();
+      case "port": case "ports": {
+        const ranges = portRanges(t.val);
+        return ranges.length ? hitPort(r.port, ranges) : false;
+      }
+      case "host": case "ip": return fieldHas(r.ip, t.val);
+      case "name": case "service": case "svc": return fieldHas(r.name, v);
+      case "version": case "info": case "banner": return fieldHas(r.version, v);
+      case "proto": case "protocol":
+        // the column is a constant ("tcp", never empty): an empty value
+        // matches nothing, under the same rule as the fieldHas keys
+        return v !== "" && "tcp".startsWith(v);
+      case "state":
+        // every row IS open (the registry records open services): the
+        // token survives for muscle memory, non-open values match nothing
+        return v === "open" ? true : false;
+      default: return anywhere();
+    }
+  });
+}
+
+// The hosts view: ip, open-port count, collected names, plus the asset
+// type, the triage mark, the pwned flag and the custom tags.
+function hostMatcher(q) {
+  const tokens = tokenize(q);
+  if (!tokens.length) return null;
+  return r => tokens.every(t => {
+    const v = t.val.toLowerCase();
+    const anywhere = () => has(r.ip, v)
+      || String(r.open_ports ?? "").includes(t.val)
+      || (r.names ?? []).some(n => has(n, v))
+      || (r.type ? has(r.type.kind, v) || has(r.type.basis, v) : false)
+      || (r.state ? has(r.state.status, v) || has(r.state.note, v) : false)
+      || (r.tags ?? []).some(g => has(g, v));
+    switch (t.key) {
+      case null: return anywhere();
+      case "host": case "ip": return fieldHas(r.ip, v);
+      case "name": case "hostname": return (r.names ?? []).some(n => has(n, v));
+      case "open": case "count": {
+        const ranges = portRanges(t.val);
+        return ranges.length ? ranges.some(([lo, hi]) => r.open_ports >= lo && r.open_ports <= hi) : false;
+      }
+      case "state": return stateIs(r, v);
+      case "type": return typeIs(r, v);
+      case "pwned": return flagIs(r.pwned, v);
+      // tag:dc needs that exact tag; tag:none needs NO tag at all
+      case "tag":
+        return v === "none" ? !(r.tags ?? []).length : (r.tags ?? []).some(g => g === v);
+      default: return anywhere();
+    }
+  });
+}
+
+// ---- the ranges home ----------------------------------------------------------
+// Three tallies on top (hosts up, service rows, ranges) and one wide row
+// ---- the rescan tab ----------------------------------------------------------
+// One tab owns the whole rescan flow: every entry point (the ranges row's
+// chip, the hosts/services bar button, the sheet's button) lands here with
+// its queue in rescanHosts, the recap is editable, one args box (prefilled
+// from the server's defaults once), one run button — and nmap's output
+// shows live while it runs. Leaving the tab stops the poll but keeps the
+// state: coming back fetches /api/scan/output at once and resumes while
+// the run is active (the server holds the capture until the next scan
+// overwrites it).
+async function renderRescan() {
+  const seq = claim();
+  $view.replaceChildren();
+  $view.appendChild(el("h2", "queue"));
+  if (!rescanHosts.length) {
+    $view.appendChild(el("div",
+      "no host queued - queue some from a range row, a services/hosts view or a host sheet.",
+      "empty"));
+  } else {
+    const chips = el("div", null, "bar");
+    rescanHosts.forEach(ip => {
+      const c = el("span", ip, "tagchip");
+      const x = el("button", "×");
+      x.title = "remove " + ip;
+      x.onclick = () => {
+        rescanHosts = rescanHosts.filter(h => h !== ip);
+        saveRescanQueue();
+        renderRescan();
+      };
+      c.appendChild(x);
+      chips.appendChild(c);
+    });
+    const clear = el("button", "clear", "chipbtn");
+    clear.title = "empty the queue";
+    clear.onclick = () => { rescanHosts = []; saveRescanQueue(); renderRescan(); };
+    chips.appendChild(clear);
+    $view.appendChild(chips);
+  }
+  const addrow = el("div", null, "bar");
+  const add = el("input");
+  add.id = "rescan-add";
+  add.placeholder = "add an ip - 10.0.0.23, Enter";
+  add.maxLength = 15;
+  add.onkeydown = e => {
+    if (e.key !== "Enter") return;
+    const v = add.value.trim();
+    if (!isIpv4(v)) { setRescanStat("not an IPv4 address: " + JSON.stringify(v)); return; }
+    if (rescanHosts.includes(v)) { setRescanStat(v + " is already in the queue"); return; }
+    queueHosts([v]);
+    renderRescan();
+  };
+  addrow.appendChild(add);
+  $view.appendChild(addrow);
+
+  $view.appendChild(el("h2", "nmap"));
+  const row = el("div", null, "scanrow");
+  const inp = el("input");
+  inp.id = "rescan-args";
+  inp.className = "args";
+  inp.placeholder = "nmap args - spliced verbatim into the frame (-p- for every port)";
+  if (rescanArgsDefaults === null) {
+    // Prefill once per page load: a re-render mid-edit must never clobber
+    // the operator's args with the defaults again.
+    api("/api/scan-defaults").then(d => {
+      rescanArgsDefaults = d.args;
+      const box = document.getElementById("rescan-args");
+      if (box && !rescanInFlight) box.value = d.args;
+    }).catch(() => {});
+  } else {
+    inp.value = rescanArgsDefaults;
+  }
+  const run = el("button", "run nmap on " + rescanHosts.length + " host(s)", "save");
+  run.id = "rescan-run";
+  const stop = el("button", "stop", "stopbtn");
+  stop.id = "rescan-stop";
+  stop.disabled = true;
+  stop.title = "kill the running nmap";
+  stop.onclick = () => postScanStop().catch(e => setRescanStat(errText(e)));
+  run.onclick = () => runRescan(inp.value);
+  row.appendChild(inp);
+  row.appendChild(run);
+  row.appendChild(stop);
+  $view.appendChild(row);
+  const stat = el("span", rescanFinal ?? "", "scanstat");
+  stat.id = "rescan-stat";
+  $view.appendChild(stat);
+
+  const outh = el("h2", "output");
+  if (rescanRunId) {
+    const rid = el("span", "run " + rescanRunId, "dim");
+    rid.title = "the newest manual run the server holds a capture for";
+    outh.appendChild(rid);
+  }
+  $view.appendChild(outh);
+  const cmd = el("div", rescanCmd ? "$ " + rescanCmd : "", "evcmd");
+  cmd.id = "rescan-cmd";
+  $view.appendChild(cmd);
+  const pre = el("pre", null, "outbox");
+  pre.id = "rescan-out";
+  if (rescanLogText) {
+    pre.textContent = rescanLogText.replace(/\n+$/, "");
+    pre.scrollTop = pre.scrollHeight;
+  }
+  $view.appendChild(pre);
+  setRescanButtons();
+  // Re-entering: recover the tail now — a run left going resumes its
+  // poll, a finished one leaves its output and final line on the page.
+  api("/api/scan/output").then(v => {
+    if (!live(seq)) return;
+    if (v.run) rescanRunId = v.run;
+    rescanCmd = v.cmd || "";
+    setRescanCmd();
+    if (v.text) {
+      rescanLogText = v.text;
+      const box = document.getElementById("rescan-out");
+      if (box) {
+        box.textContent = v.text.replace(/\n+$/, "");
+        box.scrollTop = box.scrollHeight;
+      }
+    }
+    if (v.running) startRescanPoll();
+  }).catch(() => {});
+  if (rescanInFlight) startRescanPoll();
+}
+// The tick touches only the output box, the stat line and the disabled
+// states — never a rebuild, the args input must survive mid-edit.
+function startRescanPoll() {
+  if (rescanTimer) return;
+  rescanTimer = setInterval(async () => {
+    let v = null;
+    try { v = await api("/api/scan/output"); } catch { return; }
+    if (v.run) rescanRunId = v.run;
+    if (v.cmd !== rescanCmd) { rescanCmd = v.cmd || ""; setRescanCmd(); }
+    if (v.text) {
+      rescanLogText = v.text;
+      const box = document.getElementById("rescan-out");
+      if (box) {
+        const pinned = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+        box.textContent = v.text.replace(/\n+$/, "");
+        if (pinned) box.scrollTop = box.scrollHeight;
+      }
+    }
+    const running = !!v.running || rescanInFlight;
+    if (running) setRescanStat("scanning… - " + v.size + " byte(s) of output");
+    else {
+      // Nothing of ours in flight and the server run over: the poll has
+      // nothing left to watch. The final stat (set by runRescan when the
+      // POST lands) survives — the tick only ever writes while running.
+      stopRescanPoll();
+    }
+  }, 1000);
+}
+function stopRescanPoll() {
+  if (rescanTimer) { clearInterval(rescanTimer); rescanTimer = null; }
+}
+function setRescanStat(t) {
+  const s = document.getElementById("rescan-stat");
+  if (s) s.textContent = t ?? "";
+}
+// The captured command line above the output box; empty hides it (a run
+// with no .argv on disk — pre-feature runs — shows no invented command).
+function setRescanCmd() {
+  const c = document.getElementById("rescan-cmd");
+  if (c) c.textContent = rescanCmd ? "$ " + rescanCmd : "";
+}
+function setRescanButtons() {
+  const run = document.getElementById("rescan-run");
+  const stop = document.getElementById("rescan-stop");
+  const add = document.getElementById("rescan-add");
+  if (run) {
+    run.disabled = rescanInFlight || !rescanHosts.length;
+    run.textContent = rescanInFlight
+      ? "scanning…"
+      : "run nmap on " + rescanHosts.length + " host(s)";
+  }
+  if (stop) stop.disabled = !rescanInFlight;
+  if (add) add.disabled = rescanInFlight;
+}
+// Fire the queue: clear the box, say what is scanning, keep the stop link
+// live and the poll running. The POST is synchronous server-side — the
+// response lands when the rows do — so a dropped connection only costs
+// the message: the catch says the run may have finished anyway.
+async function runRescan(args) {
+  if (rescanInFlight || !rescanHosts.length) return;
+  const ips = [...rescanHosts];
+  rescanInFlight = true;
+  rescanFinal = null;
+  rescanLogText = "";
+  rescanCmd = "";
+  const box = document.getElementById("rescan-out");
+  if (box) box.textContent = "";
+  setRescanCmd();
+  setRescanButtons();
+  setRescanStat("scanning… " + ips.length + " host(s)");
+  startRescanPoll();
+  try {
+    const v = await postScanBatch({ ips, args });
+    rescanFinal = "rescanned " + v.count + " host(s)"
+      + (v.skipped ? ", " + v.skipped + " not up" : "")
+      + " - " + v.open + " open port(s) - run " + v.run;
+  } catch (e) {
+    rescanFinal = errText(e) + " - the run may still have finished; reload to see its rows";
+  }
+  rescanInFlight = false;
+  // One last tail read so the box ends where the run did; the final stat
+  // replaces the scanning line.
+  try {
+    const v = await api("/api/scan/output");
+    if (v.text) {
+      rescanLogText = v.text;
+      const out = document.getElementById("rescan-out");
+      if (out) { out.textContent = v.text.replace(/\n+$/, ""); out.scrollTop = out.scrollHeight; }
+    }
+    if (v.cmd) { rescanCmd = v.cmd; setRescanCmd(); }
+  } catch { /* the poll kept it fresh; the final line still lands */ }
+  setRescanButtons();
+  setRescanStat(rescanFinal);
+  stopRescanPoll();
+}
+// The ranges row's chip: resolve the range's up hosts server-side (the
+// same intersection the scan would take) and add them to the queue — the
+// page stays put, the tab is reached from the sidebar.
+async function queueRangeRescan(r, btn) {
+  try {
+    const v = await postUpIps(r.range);
+    queueHosts(v.ips);
+    flashQueued(btn, "queued " + v.ips.length);
+  } catch (e) {
+    window.alert(errText(e));
+  }
+}
+
+
+// per bucket: the range, its host count, its port count. A click on a row
+// opens the hosts list filtered to that range; a rescan button on the row
+// queues nmap over every up host in it. The bucket size (/8../32) lives
+// in the hash (#/ranges/p16), the switcher rides the filter bar.
+const PREFIXES = [8, 16, 24, 32];
+async function renderRanges() {
+  const seq = claim();
+  const [st, ranges] = await Promise.all([api("/api/status"), api("/api/ranges/" + rangePrefix)]);
+  if (!live(seq)) return;
+  document.getElementById("perim").textContent = st.perimeter;
+  const rows = ranges.ranges.filter(r => !filter || r.range.toLowerCase().includes(filter.toLowerCase()));
+  const bar = filterBar("bar-ranges", "/ranges", "search", renderRanges,
+    () => rangePrefix === 24 ? "" : "p" + rangePrefix);
+  const input = bar.querySelector("input");
+  if (document.activeElement !== input) input.value = filter;
+  // The switcher: built once into the cached bar, the active chip
+  // follows rangePrefix on every render.
+  let sw = bar.querySelector(".switch");
+  if (!sw) {
+    sw = el("span", null, "switch");
+    PREFIXES.forEach(p => {
+      const b = el("button", "/" + p, "chipbtn");
+      b.onclick = () => {
+        rangePrefix = p;
+        location.hash = "#/ranges" + (p === 24 ? "" : "/p" + p)
+          + (filter ? "/" + encodeURIComponent(filter) : "");
+      };
+      sw.appendChild(b);
+    });
+    bar.insertBefore(sw, bar.querySelector(".count"));
+  }
+  sw.querySelectorAll("button").forEach(b =>
+    b.classList.toggle("on", Number(b.textContent.slice(1)) === rangePrefix));
+  bar.querySelector(".count").textContent = `${rows.length} range(s) of ${ranges.count} at /${ranges.prefix}`;
+  showBelow(bar);
+  if (st.scanning) {
+    const busy = el("div", null, "empty");
+    busy.appendChild(el("span", "a scan is running on this perimeter - "));
+    const stop = el("a", "stop it");
+    stop.href = "#";
+    stop.onclick = e => { e.preventDefault(); postScanStop().then(() => { busy.remove(); }).catch(() => {}); };
+    busy.appendChild(stop);
+    $view.appendChild(busy);
+  }
+  const cards = el("div", null, "cards");
+  cards.appendChild(card(st.up, "hosts up"));
+  cards.appendChild(card(st.services, "service row(s)"));
+  cards.appendChild(card(ranges.count, "range(s) at /" + ranges.prefix));
+  $view.appendChild(cards);
+  if (!rows.length) { $view.appendChild(el("div", "no range matches.", "empty")); return; }
+  const list = el("div", null, "rangelist");
+  rows.forEach(r => list.appendChild(rangeRow(r)));
+  $view.appendChild(list);
+}
+
+// One wide range row. The filter token is the ip: form (a bare prefix
+// could also catch names), so the hosts list shows exactly this bucket -
+// the octets kept follow the row's own prefix. The rescan button opens
+// the args panel instead of navigating.
+function rangeRow(r) {
+  const row = el("div", null, "rangerow");
+  row.appendChild(el("span", r.range, "rrname"));
+  const stats = el("span", null, "rrstats");
+  [[r.up, "hosts"], [r.open, "ports"]].forEach(([v, label]) => {
+    const s = el("span", null, "rcstat");
+    s.appendChild(el("b", v));
+    s.appendChild(el("span", label));
+    stats.appendChild(s);
+  });
+  row.appendChild(stats);
+  const rs = el("button", "rescan", "chipbtn");
+  rs.title = "add every up host in this range to the rescan queue";
+  rs.onclick = e => { e.stopPropagation(); queueRangeRescan(r, rs); };
+  row.appendChild(rs);
+  row.title = "open these hosts";
+  row.onclick = () => {
+    // The filter is the ip: form ("ip:10.30.4."); how many octets to
+    // keep follows the row's prefix - /24 keeps three, /32 keeps the
+    // exact address (and no trailing dot, it would match nothing).
+    const p = Number(r.range.split("/")[1]);
+    const octets = Math.min(4, Math.ceil(p / 8));
+    const net = r.range.split("/")[0].split(".").slice(0, octets).join(".");
+    location.hash = "#/hosts/ip:" + net + (octets < 4 ? "." : "");
+  };
+  return row;
+}
+
+async function renderServices() {
+  const seq = claim();
+  const data = await api("/api/services");
+  if (!live(seq)) return;
+  const match = svcMatcher(filter);
+  const rows = data.services.filter(r => !match || match(r));
+  const bar = filterBar("bar-services", "/services", "search", renderServices);
+  const input = bar.querySelector("input");
+  if (document.activeElement !== input) input.value = filter;
+  bar.querySelector(".count").textContent = `${rows.length} row(s) of ${data.count}`;
+  // What the view displays, in screen order: the export dropdown ships
+  // exactly these rows, the rescan button queues exactly their hosts.
+  const cols = [
+    { key: "ip", label: "host" },
+    { key: "port", label: "port", numeric: true, render: (v, r) => portBadge(r.ip, r.port, r.name) },
+    { key: "proto", label: "proto", render: () => "tcp" },
+    { key: "name", label: "name" },
+    { key: "version", label: "info", cls: "ver", render: v => v || "-" },
+  ];
+  displayedSvc = sortedRows(cols, rows, "services");
+  // Exports on the right end of the bar: the rows as displayed in three
+  // serializations, or those hosts' nmap XML from the registry.
+  exportSelect(bar, [
+    ["csv", () => postExport("/api/export/services.csv",
+      { rows: displayedSvc }, "rustrawl-services-displayed.csv")],
+    ["txt", () => postExport("/api/export/services.txt",
+      { rows: displayedSvc }, "rustrawl-services-displayed.txt")],
+    ["xml", () => postExport("/api/export/services.xml",
+      { rows: displayedSvc }, "rustrawl-services-displayed.xml")],
+    ["scan.xml", () => postExport("/api/export/scan.xml",
+      { ips: [...new Set(displayedSvc.map(r => r.ip))] }, "rustrawl-scan-displayed.xml")],
+  ]);
+  queueRescanBtn(bar, () => displayedSvc.map(r => r.ip));
+  showBelow(bar);
+  if (!rows.length) { showBelow(bar, el("div", "no service row matches.", "empty")); return; }
+  dataTable($view, cols, rows, row => { location.hash = "#/host/" + row.ip; }, "services");
+}
+
+async function renderHosts() {
+  const seq = claim();
+  const data = await api("/api/hosts");
+  if (!live(seq)) return;
+  const match = hostMatcher(filter);
+  // the no-port hosts hide behind the checkbox, the pwned lead by
+  // default, then ip order (a header click re-sorts on top of this order)
+  const rows = data.hosts.filter(r => (!match || match(r)) && (!hideNoPort || r.open_ports > 0))
+    .sort((a, b) => (b.pwned ? 1 : 0) - (a.pwned ? 1 : 0)
+      || a.ip.localeCompare(b.ip));
+  const bar = filterBar("bar-hosts", "/hosts", "search", renderHosts);
+  const input = bar.querySelector("input");
+  if (document.activeElement !== input) input.value = filter;
+  // What the checkbox took out for THIS filter - said out loud when the
+  // page goes empty, so a zero-port range row does not read as dead data.
+  const hidden = data.hosts.filter(r => (!match || match(r)) && r.open_ports === 0).length;
+  bar.querySelector(".count").textContent =
+    `${rows.length} host(s) of ${data.count}` + (hidden ? ` (${hidden} hidden)` : "");
+  // the hide-empty switch: built once, it rides the cached bar
+  let hw = bar.querySelector(".hidewh");
+  if (!hw) {
+    hw = el("label", null, "hidewh");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.onchange = () => { hideNoPort = cb.checked; renderHosts(); };
+    hw.appendChild(cb);
+    hw.appendChild(el("span", "hide hosts without open ports"));
+    bar.insertBefore(hw, bar.querySelector(".count"));
+  }
+  hw.querySelector("input").checked = hideNoPort;
+  const cols = [
+    { key: "pwned", label: "pw3nd", val: r => (r.pwned ? 0 : 1),
+      render: (v, r) => pwnedDot(r.ip, !!r.pwned) },
+    { key: "ip", label: "ip" },
+    { key: "type", label: "type", val: r => (r.type ? r.type.kind : ""), render: (v, r) => kindNode(r.type) },
+    { key: "state", label: "state", val: r => (r.state ? r.state.status : ""),
+      render: (v, r) => {
+        const wrap = el("span");
+        wrap.appendChild(pastilleNode(r.state ? r.state.status : null, () => cycleState(r.ip, r.state ? r.state.status : null)));
+        if (r.state && r.state.note) {
+          const pen = el("span", " ✎", "dim");
+          pen.title = r.state.note;
+          wrap.appendChild(pen);
+        }
+        return wrap;
+      } },
+    { key: "tags", label: "tags", cls: "ver", render: v => {
+        const wrap = el("span");
+        (v ?? []).forEach(t => wrap.appendChild(tagChip(t, null)));
+        if (!(v ?? []).length) wrap.appendChild(el("span", "-", "dim"));
+        return wrap;
+      } },
+    { key: "names", label: "names", cls: "ver", render: v => (v && v.length) ? v.join(", ") : "-" },
+    { key: "open_ports", label: "open ports", numeric: true },
+    { key: "last_up", label: "last up", numeric: true, render: fmtTime },
+  ];
+  // Same contract as the services view: what is displayed is what gets
+  // exported and queued - the filtered rows, the checkbox included.
+  displayedHosts = sortedRows(cols, rows, "hosts").map(r => r.ip);
+  exportSelect(bar, [
+    ["txt", () => postExport("/api/export/hosts.txt",
+      { ips: displayedHosts }, "rustrawl-hosts-displayed.txt")],
+    ["csv", () => postExport("/api/export/services.csv",
+      { ips: displayedHosts }, "rustrawl-hosts-displayed.csv")],
+    ["xml", () => postExport("/api/export/services.xml",
+      { ips: displayedHosts }, "rustrawl-hosts-displayed.xml")],
+    ["scan.xml", () => postExport("/api/export/scan.xml",
+      { ips: displayedHosts }, "rustrawl-scan-displayed.xml")],
+  ]);
+  queueRescanBtn(bar, () => displayedHosts);
+  showBelow(bar);
+  if (!rows.length) {
+    showBelow(bar, el("div",
+      hidden ? `no host with open ports - ${hidden} hidden by the checkbox` : "no host matches.",
+      "empty"));
+    return;
+  }
+  dataTable($view, cols, rows, row => { location.hash = "#/host/" + row.ip; }, "hosts");
+}
+
+// The nmap evidence stack: one collapsible block per scan run that queued
+// the host, newest first, the freshest one open. A run whose capture came
+// back empty still shows, as a note line — the stack tells the truth about
+// every pass instead of hiding the empty ones. Native <details> does the
+// collapsing, so this needs no JS of its own.
+function evidenceBlock(h) {
+  $view.appendChild(el("h2", "nmap evidence"));
+  if (h.evidence_note) {
+    $view.appendChild(el("div", h.evidence_note, "empty"));
+    return;
+  }
+  (h.evidence ?? []).forEach((b, i) => {
+    const d = document.createElement("details");
+    d.className = "evblock";
+    if (i === 0) d.open = true;
+    const s = document.createElement("summary");
+    s.appendChild(el("span", b.run + " · chunk-" + String(b.chunk).padStart(4, "0")));
+    if (!b.has_report) s.appendChild(el("span", " (no report)", "evmiss"));
+    d.appendChild(s);
+    if (b.cmd) d.appendChild(el("div", "$ " + b.cmd, "evcmd"));
+    const pre = el("pre");
+    b.text.replace(/\n+$/, "").split("\n").forEach(line => pre.appendChild(el("div", line)));
+    d.appendChild(pre);
+    $view.appendChild(d);
+  });
+}
+
+async function renderHost(ip) {
+  const seq = claim();
+  const h = await api("/api/host/" + ip);
+  if (!live(seq)) return;
+  $view.replaceChildren();
+  // The back arrow returns wherever the operator came from (ranges, a
+  // filtered hosts list); a fresh open on this URL falls back to ranges.
+  const back = el("a", "←", "back");
+  back.href = prevHash || "#/ranges";
+  back.title = "back";
+  const head = el("div", null, "sheethead");
+  head.appendChild(back);
+  head.appendChild(el("span", ip, "ship"));
+  const names = [...new Set((h.names ?? []).map(n => n.name))];
+  if (names.length) head.appendChild(el("span", names.join(", "), "shnames"));
+  if (h.pwned) {
+    const pw = el("span", "☠", "shpwn");
+    pw.title = "PW3ND - marked compromised";
+    head.appendChild(pw);
+  }
+  head.appendChild(typeEditor(ip, h.type ?? null));
+  $view.appendChild(head);
+  // The API flattens a hit (stages/ports/services/names at the top level,
+  // no "detail" key); only a host absent from the registry sends detail:null.
+  if (!h.stages && !h.ports && !h.services && !h.names) {
+    $view.appendChild(el("div", "nothing in the registry for this host.", "empty"));
+  } else {
+    // The operator's marks: the state (the colored vocabulary buttons),
+    // the pwned dot and the tags. Status and note merge server-side (an
+    // absent field keeps the row's value).
+    $view.appendChild(el("h2", "triage"));
+    const cur = h.state ? h.state.status : null;
+    const panel = el("div", null, "triage");
+    const staterow = el("div", null, "bar");
+    ["none", ...STATES].forEach(s => {
+      const mark = s === "none" ? null : s;
+      const b = el("button", s, "chipbtn" + (mark === cur ? " on " + s : ""));
+      b.onclick = async () => {
+        // "none" clears the status; note stays (the API's null = keep).
+        try { await postTriage(ip, 0, s, null); } catch (e) { window.alert(errText(e)); return; }
+        route();
+      };
+      staterow.appendChild(b);
+    });
+    panel.appendChild(staterow);
+    const pwrow = el("div", null, "bar");
+    pwrow.appendChild(el("span", "compromised ", "dim"));
+    pwrow.appendChild(pwnedDot(ip, !!h.pwned));
+    panel.appendChild(pwrow);
+    const tagrow = el("div", null, "bar");
+    tagrow.appendChild(el("span", "tags ", "dim"));
+    tagrow.appendChild(tagEditor(ip, h.tags));
+    panel.appendChild(tagrow);
+    $view.appendChild(panel);
+
+    $view.appendChild(el("h2", "names"));
+    if (!(h.names ?? []).length) $view.appendChild(el("div", "no hostname collected - run the names action.", "empty"));
+    else dataTable($view, [
+      { key: "name", label: "name" },
+      { key: "source", label: "source" },
+      { key: "seen", label: "last seen", numeric: true, render: fmtTime },
+      { key: "run", label: "run" },
+    ], h.names, null, "sheet-names");
+
+    // Rescan: one button queuing this host on the rescan tab — the page
+    // stays put; the args, the run, the stop and the live output all live
+    // on the tab, reached from the sidebar.
+    $view.appendChild(el("h2", "rescan"));
+    const scanrow = el("div", null, "scanrow");
+    const rs = el("button", "queue this host for a rescan", "save");
+    rs.title = "adds this host to the rescan queue";
+    rs.onclick = () => { queueHosts([ip]); flashQueued(rs, "queued"); };
+    scanrow.appendChild(rs);
+    $view.appendChild(scanrow);
+
+    $view.appendChild(el("h2", "services"));
+    if (!h.services.length) $view.appendChild(el("div", "no open service recorded.", "empty"));
+    else dataTable($view, [
+      { key: "port", label: "port", numeric: true, render: (v, r) => portBadge(ip, r.port, r.name) },
+      { key: "name", label: "service" },
+      { key: "version", label: "version", cls: "ver", render: v => v || "-" },
+      { key: "seen", label: "last seen", numeric: true, render: fmtTime },
+    ], h.services, null, "sheet-services");
+  }
+  // The capture passes (`rustrawl web`): this host's web face, newest run
+  // first — plus the one write the sheet owns, a per-asset re-shoot of
+  // this host's web services (synchronous like a rescan; whole-registry
+  // passes stay CLI-side). Then the evidence stack, and the note closes
+  // the sheet at the very bottom: markdown source with a preview,
+  // screenshots pasted straight in.
+  $view.appendChild(el("h2", "captures"));
+  const hasWeb = (h.services ?? []).some(s => svcUrl("", s.port, s.name));
+  if (hasWeb) {
+    const caprow = el("div", null, "scanrow");
+    const capbtn = el("button", "capture this host", "save");
+    capbtn.title =
+      "re-shoot this host's web services now (screenshot, headers, title, fingerprint for each)";
+    capbtn.onclick = async () => {
+      if (capbtn.disabled) return;
+      capbtn.disabled = true;
+      const orig = capbtn.textContent;
+      capbtn.textContent = "capturing…";
+      try {
+        const res = await postCapture({ ip });
+        flashQueued(capbtn, "captured " + res.total);
+        // the fresh run's tiles, once the success flash has been seen
+        setTimeout(() => renderHost(ip), 1300);
+      } catch (e) {
+        capbtn.title = errText(e);
+        capbtn.textContent = "failed";
+        setTimeout(() => { capbtn.textContent = orig; capbtn.disabled = false; }, 1600);
+      }
+    };
+    caprow.appendChild(capbtn);
+    $view.appendChild(caprow);
+  }
+  if (!(h.captures ?? []).length) {
+    $view.appendChild(el("div", hasWeb
+      ? "no capture yet - the button above re-shoots this host's web " +
+        "services; `rustrawl web` does the whole registry in one pass."
+      : "no capture for this host - `rustrawl web` captures http/https " +
+        "services, and this host lists none.",
+      "empty"));
+  } else {
+    const grid = el("div", null, "capgrid");
+    h.captures.forEach(c => grid.appendChild(sheetCap(c)));
+    $view.appendChild(grid);
+  }
+  evidenceBlock(h);
+  $view.appendChild(el("h2", "note"));
+  $view.appendChild(noteSection(ip, h.state ? (h.state.note ?? "") : ""));
+}
+
+// One capture row on the sheet: run, HTTP status, fingerprint label and
+// error class on top, the screenshot (or its duplicate pointer), then url,
+// title and the response headers in a native details block. Every field is
+// textContent — headers and titles from a hostile appliance stay data.
+function sheetCap(c) {
+  const tile = el("div", null, "captile");
+  const head = el("div", null, "bar");
+  const run = el("a", c.run, "caprun");
+  run.href = "#/capture";
+  run.title = "open the capture tab";
+  head.appendChild(run);
+  if (c.status) head.appendChild(el("span", "HTTP " + c.status, "dim"));
+  if (c.label) head.appendChild(el("span", c.label, "caplabel"));
+  if (c.error) head.appendChild(el("span", c.error, "caperr"));
+  tile.appendChild(head);
+  if (c.shot_url) {
+    const a = el("a");
+    a.href = c.shot_url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.title = "open the full screenshot";
+    const img = el("img");
+    img.loading = "lazy";
+    img.alt = "screenshot of " + c.url;
+    img.src = c.shot_url;
+    a.appendChild(img);
+    tile.appendChild(a);
+    if (c.dup_of) tile.appendChild(el("div", "same image as " + c.dup_of, "capdup"));
+  } else if (c.error) {
+    tile.appendChild(el("div", c.error, "caperr"));
+  }
+  const url = el("a", c.url, "capurl");
+  url.href = c.url;
+  url.target = "_blank";
+  url.rel = "noopener";
+  url.title = "open " + c.url + " in a new tab";
+  tile.appendChild(url);
+  if (c.title) tile.appendChild(el("div", c.title, "captitle"));
+  if (c.headers) {
+    const d = el("details", null, "capheaders");
+    d.appendChild(el("summary", "headers"));
+    d.appendChild(el("pre", c.headers));
+    tile.appendChild(d);
+  }
+  return tile;
+}
+
+// ---- the capture tab ----------------------------------------------------------
+// Read-only view over the `rustrawl web` capture passes: the CLI writes
+// runs/web_*/ (screenshots, headers, titles, fingerprints for every
+// http/https service); the dashboard only reads them here and on each
+// host sheet. The run list picks the run; an unfinished one re-polls its
+// manifest every 2 s until the state file says done — the tab never
+// launches anything itself: whole-registry passes stay CLI-side
+// (`rustrawl web`), and the one write in this feature is the sheet's
+// per-asset button.
+let capRun = null, capTimer = null;
+
+async function renderCapture() {
+  const seq = claim();
+  $view.replaceChildren();
+  $view.appendChild(el("h2", "runs"));
+  let list = null;
+  try { list = await api("/api/captures"); } catch (e) {
+    if (live(seq)) $view.appendChild(el("div", errText(e), "empty"));
+    return;
+  }
+  if (!live(seq)) return;
+  const runs = list.runs ?? [];
+  if (!runs.length) {
+    $view.appendChild(el("div",
+      "no capture run yet - `rustrawl web --out <perimeter>` launches one " +
+      "(a screenshot, headers, title and fingerprint for every http/https " +
+      "service). one host at a time: the capture button on its sheet.",
+      "empty"));
+    return;
+  }
+  // Default to the newest run; a stored choice survives while it exists.
+  if (!capRun || !runs.some(r => r.run === capRun)) capRun = runs[0].run;
+  const bar = el("div", null, "bar");
+  runs.forEach(r => {
+    const b = el("button", r.run + (r.done ? "" : " · running"), "chipbtn" + (r.run === capRun ? " on" : ""));
+    b.title = r.done_count + "/" + r.total + " captured" +
+      (r.errors ? ", " + r.errors + " failed" : "") +
+      (r.chrome ? "" : " · no browser, headers and titles only");
+    b.onclick = () => { capRun = r.run; stopCapturePoll(); renderCapture(); };
+    bar.appendChild(b);
+  });
+  $view.appendChild(bar);
+
+  const head = el("div", null, "bar");
+  const meta = el("span", "", "dim");
+  meta.id = "cap-meta";
+  head.appendChild(meta);
+  const refresh = el("button", "refresh", "chipbtn");
+  refresh.title = "re-read this run";
+  refresh.onclick = () => renderCapture();
+  head.appendChild(refresh);
+  $view.appendChild(head);
+
+  const grid = el("div", null, "capgrid");
+  grid.id = "cap-grid";
+  $view.appendChild(grid);
+  // An unfinished run keeps polling from here on (its own tick re-reads
+  // the manifest; the state flip to done ends it).
+  if (await loadCaptureGrid(seq)) startCapturePoll();
+}
+
+async function loadCaptureGrid(seq) {
+  const run = capRun;
+  let v;
+  try { v = await api("/api/captures/" + encodeURIComponent(run)); } catch (e) {
+    const meta = document.getElementById("cap-meta");
+    if (live(seq) && meta) meta.textContent = errText(e);
+    return false;
+  }
+  if (!live(seq) || run !== capRun) return false;
+  paintCapture(v);
+  return !v.done;
+}
+
+// The tick touches only the meta line and the tile grid — never a rebuild
+// of the run bar, the run buttons must survive under the cursor.
+function startCapturePoll() {
+  if (capTimer) return;
+  capTimer = setInterval(async () => {
+    let v = null;
+    try { v = await api("/api/captures/" + encodeURIComponent(capRun)); } catch { return; }
+    const meta = document.getElementById("cap-meta");
+    const grid = document.getElementById("cap-grid");
+    if (!meta || !grid) { stopCapturePoll(); return; }
+    paintCapture(v);
+    if (v.done) stopCapturePoll();
+  }, 2000);
+}
+function stopCapturePoll() {
+  if (capTimer) { clearInterval(capTimer); capTimer = null; }
+}
+function paintCapture(v) {
+  const meta = document.getElementById("cap-meta");
+  const grid = document.getElementById("cap-grid");
+  if (!meta || !grid) return;
+  meta.textContent = v.done_count + "/" + v.total + " captured" +
+    (v.interrupted ? " · interrupted" : "") +
+    (v.done ? "" : " · running… (2 s refresh)");
+  grid.replaceChildren(...(v.targets ?? []).map(t => capTile(t)));
+}
+// One target tile: the screenshot when the target kept one (click opens
+// the full PNG), else its error class as the placeholder; url, title and
+// fingerprint label under it, duplicate pointers included. Every field is
+// textContent — a hostile page title stays data.
+function capTile(t) {
+  const tile = el("div", null, "captile");
+  if (t.shot_url) {
+    const a = el("a");
+    a.href = t.shot_url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.title = "open the full screenshot";
+    const img = el("img");
+    img.loading = "lazy";
+    img.alt = "screenshot of " + t.url;
+    img.src = t.shot_url;
+    a.appendChild(img);
+    tile.appendChild(a);
+  } else {
+    tile.appendChild(el("div", t.error || "no image", "caperr"));
+  }
+  const url = el("a", t.url, "capurl");
+  url.href = t.url;
+  url.target = "_blank";
+  url.rel = "noopener";
+  url.title = "open " + t.url + " in a new tab";
+  tile.appendChild(url);
+  if (t.title) tile.appendChild(el("div", t.title, "captitle"));
+  if (t.label) tile.appendChild(el("span", t.label, "caplabel"));
+  if (t.dup_of) tile.appendChild(el("div", "same image as " + t.dup_of, "capdup"));
+  return tile;
+}
+
+// ---- router ------------------------------------------------------------------
+const tabs = ["ranges", "services", "hosts", "rescan", "capture"];
+function renderCurrent() { route(); }
+async function route() {
+  const hash = location.hash || "#/ranges";
+  tabs.forEach(t => document.getElementById("tab-" + t).classList.toggle("active",
+    hash === "#/" + t || hash.startsWith("#/" + t + "/")));
+  // Leaving the rescan tab stops its poll; the server keeps the capture
+  // keyed to the newest manual run and the page keeps its copy, so
+  // coming back recovers the output while the run is active. Same for
+  // the capture tab's progress poll.
+  if (!hash.startsWith("#/rescan")) stopRescanPoll();
+  if (!hash.startsWith("#/capture")) stopCapturePoll();
+  // Each render claims one token; a late failure from a render a newer
+  // route already superseded must not clobber the fresh view, so the
+  // error paints only while nothing beyond the failing render claimed.
+  const claimed = renderSeq;
+  try {
+    if (hash.startsWith("#/host/")) {
+      await renderHost(decodeURIComponent(hash.slice("#/host/".length)));
+    } else if (hash.startsWith("#/hosts/")) {
+      // A range row (or a carried filter) landed here: the filter comes
+      // from the URL, the search box picks it up and stays editable.
+      filter = decodeURIComponent(hash.slice("#/hosts/".length));
+      await renderHosts();
+    } else if (hash.startsWith("#/services/")) {
+      filter = decodeURIComponent(hash.slice("#/services/".length));
+      await renderServices();
+    } else if (hash.startsWith("#/rescan")) {
+      await renderRescan();
+    } else if (hash.startsWith("#/capture")) {
+      await renderCapture();
+    } else if (hash.startsWith("#/ranges/")) {
+      // #/ranges/p16[/filter] carries the bucket size; anything else is
+      // a plain filter at the default /24 (old hashes keep working - a
+      // filter can never start with p<digits>, it matches ranges).
+      const rest = hash.slice("#/ranges/".length);
+      const m = rest.match(/^p(8|16|24|32)(?:\/(.*))?$/);
+      if (m) {
+        rangePrefix = Number(m[1]);
+        filter = m[2] ? decodeURIComponent(m[2]) : "";
+      } else {
+        rangePrefix = 24;
+        filter = decodeURIComponent(rest);
+      }
+      await renderRanges();
+    } else if (hash === "#/services") await renderServices();
+    else if (hash === "#/hosts") await renderHosts();
+    else {
+      // A stale deep link (#/status from an older bookmark): home is
+      // ranges, the URL says so too, and the ranges tab lights up.
+      if (hash !== "#/ranges") {
+        history.replaceState(null, "", "#/ranges");
+        document.getElementById("tab-ranges").classList.add("active");
+      }
+      rangePrefix = 24;
+      await renderRanges();
+    }
+  } catch (e) {
+    if (renderSeq <= claimed + 1) $view.replaceChildren(el("div", errText(e), "empty"));
+  }
+}
+window.addEventListener("hashchange", () => {
+  prevHash = curHash;
+  curHash = location.hash;
+  for (const id in sortState) delete sortState[id];
+  filter = "";
+  route();
+});
+curHash = location.hash || "#/ranges";
+api("/api/status").then(s => document.getElementById("perim").textContent = s.perimeter).catch(() => {});
+route();
+</script>
+</body>
+</html>

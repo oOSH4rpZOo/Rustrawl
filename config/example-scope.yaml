@@ -1,0 +1,50 @@
+# Example scope — `rustrawl run <file> --out <root>`, then `rustrawl scan <file> --out <root>`
+
+name: acme-demo
+
+includes:
+  - 10.0.0.0/16
+  - 192.168.10.0/24
+  - 172.16.7.50
+
+excludes:                    # subtracted before any computation
+  - 10.0.0.1/32              # gateway
+  - 10.0.255.255/32          # broadcast
+  - 10.0.40.0/24             # outside the contract
+
+sensitive_zones:             # passive = zero probes, light = reduced profile
+  - range: 10.0.50.0/24
+    policy: passive
+  - range: 10.0.60.0/24
+    policy: light
+
+# Discovery (`run`): wide sweep, then /24 expansion of live neighborhoods
+discovery:
+  rate_pps: 10000
+  jitter_pct: 20
+  block: 4096
+  mute_abort_after: 1024     # consecutive mute hosts → cooldown (0 disables)
+  mute_cooldown_secs: 60
+  icmp: true                 # echo liveness before each sweep group (raw mode only)
+  # interface: eth1          # pin every probe (SO_BINDTODEVICE, route-checked)
+  sweep_profiles:            # first match wins; the rest uses `ports`
+    - range: 10.0.0.0/8
+      ports: top5
+    - range: 172.16.0.0/12
+      ports: top8
+    - range: 192.168.0.0/16
+      ports: top15
+  ports: top25               # default sweep profile (topN | full | [21, 22, ...])
+  expand_ports: [21, 22, 23, 25, 53, 80, 135, 139, 389, 443, 445, 1433, 3306, 3389, 5432, 5900, 5985, 8080, 8443, 9100]  # liveness only — no enumeration here
+
+# The nmap pass (`scan`) over the up list
+scan:
+  nmap_args: "-sC -sV -p 21-25,53,80,135,139,443,445,3389,8080"  # spliced verbatim — the port list rides here (-p- for every port); -oX/-iL/-iR stay rustrawl's
+  threads: 4
+  # refresh_after: 30d       # queue only never-scanned or stale hosts
+
+# Memory: a miss is not a verdict, an up verdict ages
+rescan:
+  skip_done: true
+  retry_no_response_after: 7d
+  recheck_up_after: 30d

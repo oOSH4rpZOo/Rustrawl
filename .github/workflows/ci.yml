@@ -1,0 +1,98 @@
+# CI for rustrawl: tests, lints, a static musl build, and a Debian 12
+# smoke test (the deployment target). Pure std + one bundled-C dependency
+# (rusqlite), so everything runs without root and without nmap.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test + clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests (unit + loopback integration)
+        run: cargo test --locked
+      # The root-only SYN path cannot run on shared runners (no CAP_NET_RAW);
+      # it is guarded by #[ignore] and exercised by hand on the operator box.
+      - name: Build release
+        run: cargo build --release --locked
+
+  musl:
+    name: static musl build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: musl C toolchain (rusqlite's bundled sqlite3 needs it)
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Build static binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      # `file` reports "statically linked" or "static-pie linked" depending
+      # on the toolchain's PIE default — match either, reject dynamic.
+      - name: Sanity — fully static, runs
+        run: |
+          file target/x86_64-unknown-linux-musl/release/rustrawl | grep -qi static
+          file target/x86_64-unknown-linux-musl/release/rustrawl | grep -qvi "dynamically linked"
+          target/x86_64-unknown-linux-musl/release/rustrawl --help > /dev/null
+      # upload-artifact zips without the executable bit — pack a tarball so
+      # the downloaded binary runs as-is (tar -z preserves modes).
+      - name: Pack
+        run: tar -czf rustrawl-musl.tar.gz -C target/x86_64-unknown-linux-musl/release rustrawl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustrawl-musl
+          path: rustrawl-musl.tar.gz
+
+  debian12:
+    name: Debian 12 smoke test
+    runs-on: ubuntu-latest
+    container: debian:12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (debian:12 ships no toolchain)
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends curl ca-certificates build-essential file
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Tests on the deployment target
+        run: cargo test --locked
+      - name: Connect-mode end-to-end on loopback (no root needed)
+        run: |
+          cargo build --release --locked
+          # Debian 12 container is the closest stand-in for the audit box;
+          # the binary must at least parse a scope and run a dry run.
+          cat > /tmp/scope.yaml <<'YAML'
+          name: ci-smoke
+          includes:
+            - 127.0.0.0/30
+          discovery:
+            rate_pps: 1000
+            ports: [1]
+            expand_ports: [1]
+            icmp: false
+          scan:
+            nmap_args: "-sT -p 1"
+            threads: 1
+          YAML
+          ./target/release/rustrawl run /tmp/scope.yaml --out /tmp/perim --dry-run
+          ./target/release/rustrawl run /tmp/scope.yaml --out /tmp/perim --mode connect
+          ./target/release/rustrawl db --out /tmp/perim stats
+          ./target/release/rustrawl db --out /tmp/perim export > /tmp/scan.xml
+          head -2 /tmp/scan.xml
+          ./target/release/rustrawl db --out /tmp/perim export | grep -q '<nmaprun'
