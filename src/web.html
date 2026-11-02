@@ -266,13 +266,15 @@
 
   /* The filter bar's export dropdown (right end): exports exactly what the
      view displays — a filter leaving 10 rows exports those 10. Same box
-     look as the bar's input, the focus ring comes from :focus-visible. */
-  select.xsel {
+     look as the bar's input, the focus ring comes from :focus-visible.
+     The display-cap select borrows the look through .limit - deliberately
+     NOT the xsel class: exportSelect keys its build-once guard on it. */
+  select.xsel, select.limit {
     background: var(--bg); border: 1px solid var(--line); color: var(--fg);
     border-radius: 8px; padding: 7px 12px; font-family: var(--mono);
     font-size: 13px; cursor: pointer;
   }
-  select.xsel:hover { border-color: var(--navy); }
+  select.xsel:hover, select.limit:hover { border-color: var(--navy); }
   /* The rescan tab's live output: nmap's stdout as it writes, the page
      pinned to the bottom of it. */
   .outbox {
@@ -427,6 +429,25 @@ let rescanTimer = null, rescanInFlight = false, rescanCmd = "";
 // exact screen order (post-sort): the export dropdown and the rescan
 // button read these, so a filter leaving 10 rows exports those 10.
 let displayedSvc = [], displayedHosts = [];
+
+// The per-tab display cap: how many table rows a view draws (10/100/1000/all).
+// It caps the TABLE only - exports and the rescan queue button keep the full
+// filtered set, and the count line says "showing N" when the cap bites.
+// Persisted per tab like the rescan queue; a stale or junk value falls back
+// to "all".
+const SHOW_CHOICES = [10, 100, 1000, "all"];
+const SHOW_KEYS = { services: "rustrawl-show-services", hosts: "rustrawl-show-hosts" };
+function loadShow(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return SHOW_CHOICES.includes(v) ? v : "all";
+  } catch { return "all"; }
+}
+function saveShow(key, v) {
+  try { localStorage.setItem(key, JSON.stringify(v)); } catch {}
+}
+let showSvc = loadShow(SHOW_KEYS.services);
+let showHosts = loadShow(SHOW_KEYS.hosts);
 
 // The triage vocabulary: one mark per host, todo (orange) / clean (green)
 // / vuln (red), cycled none → todo → vuln → clean → none. Marks live on
@@ -995,6 +1016,9 @@ function filterBar(id, base, placeholder, apply, segFn) {
   bar.id = id;
   const input = el("input");
   input.placeholder = placeholder;
+  // the grammar in one line - the query-language comment in the source
+  // carries the full text
+  input.title = "AND of tokens - key:value over port (lists and ranges: port:22,80,1000-2000), host/ip, name, version, state, type, pwned, tag, open; quote values with spaces; a leading - excludes: -ssh, -port:22";
   const sync = () => {
     filter = input.value;
     // segFn lets a view carry extra hash state (the ranges home's
@@ -1018,42 +1042,75 @@ function showBelow(bar, node) {
   if (node) $view.appendChild(node);
 }
 
+// The display-cap select, built once per bar (it rides the cached bar like
+// the hide-empty switch) and re-synced each render. `get`/`set` touch the
+// view's module var; `set` also persists and re-renders the view.
+function limitSelect(bar, get, set) {
+  let sel = bar.querySelector("select.limit");
+  if (!sel) {
+    sel = el("select", null, "limit");
+    sel.title = "rows drawn per page - exports and the rescan queue keep the full filtered set";
+    for (const c of SHOW_CHOICES) {
+      const o = el("option", String(c));
+      o.value = String(c);
+      sel.appendChild(o);
+    }
+    sel.onchange = () => {
+      const v = sel.value === "all" ? "all" : Number(sel.value);
+      set(v);
+    };
+    bar.insertBefore(sel, bar.querySelector(".count"));
+  }
+  sel.value = String(get());
+  return sel;
+}
+
 // ---- the query language -----------------------------------------------------
 // A filter string is whitespace-separated tokens, all of which must match
-// (AND). `key:value` limits one field — port takes lists and inclusive
-// ranges (port:22,80,1000-2000); host/ip, name/service, version/info/banner
+// (AND). A token with a leading "-" negates: -ssh, -port:22, -name:"win rpc"
+// — everything the token would have kept is dropped instead. `key:value`
+// limits one field — port takes lists and inclusive ranges
+// (port:22,80,1000-2000); host/ip, name/service, version/info/banner
 // are substrings (quote a value to keep its spaces: name:"win rpc");
 // proto/protocol and state check the constant columns; state:/type: filter
 // the operator's triage marks and the asset types. A bare term is a
 // substring across the whole row. Edge rules: a keyed value that parses to
 // nothing (port:abc, port:500-80) matches NOTHING — a typo must hide every
-// row, not silently unfilter — and an empty quoted value (version:"")
-// matches rows whose field IS empty (the banners nmap could not name).
+// row, not silently unfilter, and negation keeps that rule: -port:abc still
+// hides every row. An empty quoted value (version:"") matches rows whose
+// field IS empty (the banners nmap could not name); -version:"" is "field
+// has a value".
 function tokenize(q) {
   const out = [];
   for (const tok of q.match(/(?:[^\s"]+|"[^"]*")+/g) || []) {
-    const m = tok.match(/^([a-zA-Z]+):(.*)$/);
+    // A leading "-" flips the token; stripped before the key split, which
+    // never fired on a leading dash, so no pre-negation query changes
+    // meaning.
+    const neg = tok.startsWith("-");
+    const body = neg ? tok.slice(1) : tok;
+    const m = body.match(/^([a-zA-Z]+):(.*)$/);
     if (m) {
       let val = m[2];
       if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-      out.push({ key: m[1].toLowerCase(), val });
+      out.push({ neg, key: m[1].toLowerCase(), val });
     } else {
-      out.push({ key: null, val: tok.replace(/"/g, "") });
+      out.push({ neg, key: null, val: body.replace(/"/g, "") });
     }
   }
   return out;
 }
 
+// null = invalid spec (one bad piece poisons the token), a list of
+// inclusive ranges otherwise. The null is what keeps the poison rule under
+// negation: `port:22,1o00` hides every row, and so does -port:22,1o00 - a
+// typo must scream, not unfilter. The CLI refuses the same input outright.
 function portRanges(spec) {
   const ranges = [];
   for (const piece of spec.split(",")) {
     const m = piece.trim().match(/^(\d+)(?:-(\d+))?$/);
-    // One bad piece poisons the whole token: `port:22,1o00` must hide every
-    // row (a typo screams), not silently unfilter that piece. The CLI
-    // refuses the same input outright.
-    if (!m) return [];
+    if (!m) return null;
     const lo = Number(m[1]), hi = m[2] === undefined ? lo : Number(m[2]);
-    if (hi < lo) return [];
+    if (hi < lo) return null;
     ranges.push([lo, hi]);
   }
   return ranges;
@@ -1064,79 +1121,99 @@ const has = (text, v) => String(text ?? "").toLowerCase().includes(v);
 // A keyed empty value asks "the field is empty"; anything else is a
 // case-insensitive substring.
 const fieldHas = (text, v) => (v === "" ? String(text ?? "") === "" : has(text, v));
-// state:todo|clean|vuln needs that exact mark; state:none needs NO
-// mark at all; anything else matches nothing (a typo must not unfilter).
-const stateIs = (r, v) => (v === "none" ? !r.state : !!r.state && r.state.status === v);
-// type:dc needs that exact class; type:none needs NO type at all.
+// state:todo|clean|vuln needs that exact mark; state:none needs NO mark at
+// all; anything else is an invalid spec and returns null - the poison rule
+// survives negation (-state:junk still hides every row).
+const stateIs = (r, v) => (v === "none" ? !r.state
+  : ["todo", "vuln", "clean"].includes(v) ? (!!r.state && r.state.status === v)
+  : null);
+// type:dc needs that exact class; type:none needs NO type at all. Kinds are
+// an open vocabulary (the class editor takes any word), so any value is a
+// valid spec here: a typo just matches nothing, and negation inverts that.
 const typeIs = (r, v) => (v === "none" ? !r.type : !!r.type && r.type.kind === v);
 // pwned:yes|no reads the compromise flag; on/off/1/0 are aliases, anything
-// else matches nothing (a typo must not unfilter).
+// else is an invalid spec (null - the poison rule holds under negation).
 const flagIs = (mark, v) =>
   ["yes", "on", "1"].includes(v) ? !!mark
   : ["no", "off", "0", "none"].includes(v) ? !mark
-  : false;
+  : null;
 
 // The services view: rows carry ip/port/name/version (proto is the
 // constant "tcp" — the registry records open TCP services only; every row
 // is the scan's "open" verdict).
+// One token against one row: true/false when the spec is valid, null when
+// the spec itself is invalid. The matcher wraps each verdict - null hides
+// the row under either polarity, a boolean inverts under t.neg.
+function svcTok(t, r) {
+  const v = t.val.toLowerCase();
+  const anywhere = () => has(r.ip, v) || has(r.name, v) || has(r.version, v)
+    || String(r.port).includes(v);
+  switch (t.key) {
+    case null: return anywhere();
+    case "port": case "ports": {
+      const ranges = portRanges(t.val);
+      return ranges === null ? null : hitPort(r.port, ranges);
+    }
+    case "host": case "ip": return fieldHas(r.ip, t.val);
+    case "name": case "service": case "svc": return fieldHas(r.name, v);
+    case "version": case "info": case "banner": return fieldHas(r.version, v);
+    case "proto": case "protocol":
+      // the column is a constant ("tcp", never empty): an empty value
+      // matches nothing, under the same rule as the fieldHas keys
+      return v !== "" && "tcp".startsWith(v);
+    case "state":
+      // every row IS open (the registry records open services): the token
+      // survives for muscle memory, non-open values are invalid specs
+      return v === "open" ? true : null;
+    default: return anywhere();
+  }
+}
 function svcMatcher(q) {
   const tokens = tokenize(q);
   if (!tokens.length) return null;
   return r => tokens.every(t => {
-    const v = t.val.toLowerCase();
-    const anywhere = () => has(r.ip, t.val) || has(r.name, v) || has(r.version, v)
-      || String(r.port).includes(t.val);
-    switch (t.key) {
-      case null: return anywhere();
-      case "port": case "ports": {
-        const ranges = portRanges(t.val);
-        return ranges.length ? hitPort(r.port, ranges) : false;
-      }
-      case "host": case "ip": return fieldHas(r.ip, t.val);
-      case "name": case "service": case "svc": return fieldHas(r.name, v);
-      case "version": case "info": case "banner": return fieldHas(r.version, v);
-      case "proto": case "protocol":
-        // the column is a constant ("tcp", never empty): an empty value
-        // matches nothing, under the same rule as the fieldHas keys
-        return v !== "" && "tcp".startsWith(v);
-      case "state":
-        // every row IS open (the registry records open services): the
-        // token survives for muscle memory, non-open values match nothing
-        return v === "open" ? true : false;
-      default: return anywhere();
-    }
+    const h = svcTok(t, r);
+    return h !== null && (t.neg ? !h : h);
   });
 }
 
 // The hosts view: ip, open-port count, collected names, plus the asset
-// type, the triage mark, the pwned flag and the custom tags.
+// type, the triage mark, the pwned flag and the custom tags. Same tri-state
+// contract as svcTok: null (invalid spec) hides under either polarity, a
+// boolean inverts under t.neg.
+function hostTok(t, r) {
+  const v = t.val.toLowerCase();
+  const anywhere = () => has(r.ip, v)
+    || String(r.open_ports ?? "").includes(v)
+    || (r.names ?? []).some(n => has(n, v))
+    || (r.type ? has(r.type.kind, v) || has(r.type.basis, v) : false)
+    || (r.state ? has(r.state.status, v) || has(r.state.note, v) : false)
+    || (r.tags ?? []).some(g => has(g, v));
+  switch (t.key) {
+    case null: return anywhere();
+    case "host": case "ip": return fieldHas(r.ip, v);
+    case "name": case "hostname": return (r.names ?? []).some(n => has(n, v));
+    case "open": case "count": {
+      const ranges = portRanges(t.val);
+      return ranges === null ? null
+        : ranges.some(([lo, hi]) => r.open_ports >= lo && r.open_ports <= hi);
+    }
+    case "state": return stateIs(r, v);
+    case "type": return typeIs(r, v);
+    case "pwned": return flagIs(r.pwned, v);
+    // tag:dc needs that exact tag; tag:none needs NO tag at all; tags are
+    // an open vocabulary, so any value is a valid spec
+    case "tag":
+      return v === "none" ? !(r.tags ?? []).length : (r.tags ?? []).some(g => g === v);
+    default: return anywhere();
+  }
+}
 function hostMatcher(q) {
   const tokens = tokenize(q);
   if (!tokens.length) return null;
   return r => tokens.every(t => {
-    const v = t.val.toLowerCase();
-    const anywhere = () => has(r.ip, v)
-      || String(r.open_ports ?? "").includes(t.val)
-      || (r.names ?? []).some(n => has(n, v))
-      || (r.type ? has(r.type.kind, v) || has(r.type.basis, v) : false)
-      || (r.state ? has(r.state.status, v) || has(r.state.note, v) : false)
-      || (r.tags ?? []).some(g => has(g, v));
-    switch (t.key) {
-      case null: return anywhere();
-      case "host": case "ip": return fieldHas(r.ip, v);
-      case "name": case "hostname": return (r.names ?? []).some(n => has(n, v));
-      case "open": case "count": {
-        const ranges = portRanges(t.val);
-        return ranges.length ? ranges.some(([lo, hi]) => r.open_ports >= lo && r.open_ports <= hi) : false;
-      }
-      case "state": return stateIs(r, v);
-      case "type": return typeIs(r, v);
-      case "pwned": return flagIs(r.pwned, v);
-      // tag:dc needs that exact tag; tag:none needs NO tag at all
-      case "tag":
-        return v === "none" ? !(r.tags ?? []).length : (r.tags ?? []).some(g => g === v);
-      default: return anywhere();
-    }
+    const h = hostTok(t, r);
+    return h !== null && (t.neg ? !h : h);
   });
 }
 
@@ -1470,9 +1547,7 @@ async function renderServices() {
   const bar = filterBar("bar-services", "/services", "search", renderServices);
   const input = bar.querySelector("input");
   if (document.activeElement !== input) input.value = filter;
-  bar.querySelector(".count").textContent = `${rows.length} row(s) of ${data.count}`;
-  // What the view displays, in screen order: the export dropdown ships
-  // exactly these rows, the rescan button queues exactly their hosts.
+  limitSelect(bar, () => showSvc, v => { showSvc = v; saveShow(SHOW_KEYS.services, v); renderServices(); });
   const cols = [
     { key: "ip", label: "host" },
     { key: "port", label: "port", numeric: true, render: (v, r) => portBadge(r.ip, r.port, r.name) },
@@ -1480,7 +1555,13 @@ async function renderServices() {
     { key: "name", label: "name" },
     { key: "version", label: "info", cls: "ver", render: v => v || "-" },
   ];
+  // What the view displays, in screen order: the export dropdown ships
+  // exactly these rows, the rescan button queues exactly their hosts - the
+  // display cap cuts only what the table below draws, never this set.
   displayedSvc = sortedRows(cols, rows, "services");
+  const shown = showSvc === "all" ? displayedSvc : displayedSvc.slice(0, showSvc);
+  bar.querySelector(".count").textContent = `${rows.length} row(s) of ${data.count}` +
+    (shown.length < rows.length ? ` - showing ${shown.length}` : "");
   // Exports on the right end of the bar: the rows as displayed in three
   // serializations, or those hosts' nmap XML from the registry.
   exportSelect(bar, [
@@ -1496,7 +1577,7 @@ async function renderServices() {
   queueRescanBtn(bar, () => displayedSvc.map(r => r.ip));
   showBelow(bar);
   if (!rows.length) { showBelow(bar, el("div", "no service row matches.", "empty")); return; }
-  dataTable($view, cols, rows, row => { location.hash = "#/host/" + row.ip; }, "services");
+  dataTable($view, cols, shown, row => { location.hash = "#/host/" + row.ip; }, "services");
 }
 
 async function renderHosts() {
@@ -1515,8 +1596,6 @@ async function renderHosts() {
   // What the checkbox took out for THIS filter - said out loud when the
   // page goes empty, so a zero-port range row does not read as dead data.
   const hidden = data.hosts.filter(r => (!match || match(r)) && r.open_ports === 0).length;
-  bar.querySelector(".count").textContent =
-    `${rows.length} host(s) of ${data.count}` + (hidden ? ` (${hidden} hidden)` : "");
   // the hide-empty switch: built once, it rides the cached bar
   let hw = bar.querySelector(".hidewh");
   if (!hw) {
@@ -1529,6 +1608,7 @@ async function renderHosts() {
     bar.insertBefore(hw, bar.querySelector(".count"));
   }
   hw.querySelector("input").checked = hideNoPort;
+  limitSelect(bar, () => showHosts, v => { showHosts = v; saveShow(SHOW_KEYS.hosts, v); renderHosts(); });
   const cols = [
     { key: "pwned", label: "pw3nd", val: r => (r.pwned ? 0 : 1),
       render: (v, r) => pwnedDot(r.ip, !!r.pwned) },
@@ -1556,8 +1636,14 @@ async function renderHosts() {
     { key: "last_up", label: "last up", numeric: true, render: fmtTime },
   ];
   // Same contract as the services view: what is displayed is what gets
-  // exported and queued - the filtered rows, the checkbox included.
-  displayedHosts = sortedRows(cols, rows, "hosts").map(r => r.ip);
+  // exported and queued - the filtered rows, the checkbox included. The
+  // display cap cuts only what the table below draws, never this set.
+  const sorted = sortedRows(cols, rows, "hosts");
+  displayedHosts = sorted.map(r => r.ip);
+  const shown = showHosts === "all" ? sorted : sorted.slice(0, showHosts);
+  bar.querySelector(".count").textContent =
+    `${rows.length} host(s) of ${data.count}` + (hidden ? ` (${hidden} hidden)` : "") +
+    (shown.length < rows.length ? ` - showing ${shown.length}` : "");
   exportSelect(bar, [
     ["txt", () => postExport("/api/export/hosts.txt",
       { ips: displayedHosts }, "rustrawl-hosts-displayed.txt")],
@@ -1576,7 +1662,7 @@ async function renderHosts() {
       "empty"));
     return;
   }
-  dataTable($view, cols, rows, row => { location.hash = "#/host/" + row.ip; }, "hosts");
+  dataTable($view, cols, shown, row => { location.hash = "#/host/" + row.ip; }, "hosts");
 }
 
 // The nmap evidence stack: one collapsible block per scan run that queued
@@ -1670,15 +1756,36 @@ async function renderHost(ip) {
       { key: "run", label: "run" },
     ], h.names, null, "sheet-names");
 
-    // Rescan: one button queuing this host on the rescan tab — the page
-    // stays put; the args, the run, the stop and the live output all live
-    // on the tab, reached from the sidebar.
+    // Rescan: the queue button drops this host on the rescan tab (the
+    // args, the run, the stop and the live output all live there), and the
+    // second button fires a one-host rescan right here - synchronous like
+    // the capture button below, the sheet re-renders with the fresh rows.
     $view.appendChild(el("h2", "rescan"));
     const scanrow = el("div", null, "scanrow");
     const rs = el("button", "queue this host for a rescan", "save");
     rs.title = "adds this host to the rescan queue";
     rs.onclick = () => { queueHosts([ip]); flashQueued(rs, "queued"); };
     scanrow.appendChild(rs);
+    const rsNow = el("button", "rescan this host now", "save");
+    rsNow.title = "runs nmap on this host right away, with the usual args";
+    rsNow.onclick = async () => {
+      if (rsNow.disabled) return;
+      rsNow.disabled = true;
+      const orig = rsNow.textContent;
+      rsNow.textContent = "scanning...";
+      try {
+        const res = await postScanBatch({ ip });
+        flashQueued(rsNow, "rescanned, " + res.open + " open");
+        // the fresh services and evidence, once the flash has been seen -
+        // unless the operator moved on (any navigation bumps the token)
+        setTimeout(() => { if (live(seq)) renderHost(ip); }, 1300);
+      } catch (e) {
+        rsNow.title = errText(e);
+        rsNow.textContent = "failed";
+        setTimeout(() => { rsNow.textContent = orig; rsNow.disabled = false; }, 1600);
+      }
+    };
+    scanrow.appendChild(rsNow);
     $view.appendChild(scanrow);
 
     $view.appendChild(el("h2", "services"));
@@ -1711,8 +1818,9 @@ async function renderHost(ip) {
       try {
         const res = await postCapture({ ip });
         flashQueued(capbtn, "captured " + res.total);
-        // the fresh run's tiles, once the success flash has been seen
-        setTimeout(() => renderHost(ip), 1300);
+        // the fresh run's tiles, once the success flash has been seen -
+        // unless the operator moved on (any navigation bumps the token)
+        setTimeout(() => { if (live(seq)) renderHost(ip); }, 1300);
       } catch (e) {
         capbtn.title = errText(e);
         capbtn.textContent = "failed";

@@ -20,6 +20,11 @@ cargo build --release
 cargo build --release --target x86_64-unknown-linux-musl   # static
 ```
 
+CI also packs the static build as the `rustrawl-musl` artifact (a
+tarball) on every push to main: grab it when the target box runs an
+older glibc than the build box, the classic `GLIBC_x.y not found`
+error.
+
 SYN mode needs root or CAP_NET_RAW. Without them, `--mode auto` falls
 back to TCP connect.
 
@@ -135,6 +140,7 @@ asset types, notes and rescans, and every write requires an
 ```
 data/acme/
 ├── scandb.sqlite              # the registry, queried before every scan decision
+├── scope.yaml                 # copy of the operator's scope, refreshed at every run/scan
 ├── run.lock                   # one scan at a time per perimeter
 └── runs/
     ├── discovery_<date>_<time>/   # ip.txt, live.jsonl, state.json, run.log

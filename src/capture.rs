@@ -845,7 +845,7 @@ pub(crate) fn run_pass(
 ) -> Result<RunSummary> {
     let run_id = state::stamped_id("web");
     let run_dir = state::create_run(out, &run_id)?;
-    // create_run may have suffixed the id ("-2") to keep two same-second
+    // create_run may have suffixed the id ("-02") to keep two same-second
     // runs apart — everything from here on (log line, state file, dedup
     // reads, the summary) must carry the directory's actual name, or the
     // manifest reads land in the first run's evidence.
@@ -1067,7 +1067,7 @@ pub(crate) fn valid_run_id(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("web_") else {
         return false;
     };
-    // A create_run collision suffix ("-2", "-12") rides on the last dash;
+    // A create_run collision suffix ("-02", "-12") rides on the last dash;
     // anything else after a dash breaks the stamp shape.
     let stamp = match rest.rsplit_once('-') {
         Some((a, b)) if digits(b) && b.len() <= 2 => a,

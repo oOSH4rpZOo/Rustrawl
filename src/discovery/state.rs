@@ -131,7 +131,7 @@ pub fn fingerprint(ranges: &[crate::targets::IpRange], ports: &[u16]) -> u64 {
 
 /// `<prefix>_<YYYY-MM-DD>_<HHMMSS>` in local time — sortable, fs-safe and
 /// readable at a glance in `runs/`. Two runs started within the same second
-/// stay distinct through `create_run`'s `-2`/`-3` suffix.
+/// stay distinct through `create_run`'s `-02`/`-03` suffix.
 pub fn stamped_id(prefix: &str) -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -184,13 +184,45 @@ pub fn create_run(root: &Path, run_id: &str) -> Result<PathBuf> {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 n += 1;
-                dir = runs.join(format!("{run_id}-{n}"));
+                // Zero-padded: name order stays creation order (the disk
+                // fallback that picks the newest manual run leans on it)
+                // even at the tenth same-second run, where a bare "-10"
+                // would sort before "-2".
+                dir = runs.join(format!("{run_id}-{n:02}"));
             }
             Err(e) => {
                 return Err(e).with_context(|| format!("creating run dir {}", dir.display()));
             }
         }
     }
+}
+
+/// Keeps the operator's scope file with the perimeter: copied to
+/// `<root>/scope.yaml` at run/scan start, overwritten each time. The
+/// dashboard's scan-defaults fallback reads it before any queue run
+/// exists, and the copy says at a glance which scope built this registry.
+pub fn save_scope_copy(root: &Path, scope_path: &Path) -> Result<()> {
+    std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    let dst = root.join("scope.yaml");
+    // fs::copy truncates its destination before reading the source, so a
+    // scope that already IS the destination - the same path, a symlink on
+    // either side, a hard link - would wipe itself to 0 bytes while
+    // reporting success. Same file by device+inode (metadata follows
+    // symlinks; a destination that does not exist yet never matches): the
+    // copy would be a self-truncation, skip it.
+    let same = match (std::fs::metadata(scope_path), std::fs::metadata(&dst)) {
+        (Ok(a), Ok(b)) => {
+            use std::os::unix::fs::MetadataExt;
+            a.dev() == b.dev() && a.ino() == b.ino()
+        }
+        _ => false,
+    };
+    if same {
+        return Ok(());
+    }
+    std::fs::copy(scope_path, &dst)
+        .with_context(|| format!("copying {} to {}", scope_path.display(), dst.display()))?;
+    Ok(())
 }
 
 /// Newest run with an unfinished stage — the resume target. Either stage's
@@ -444,6 +476,47 @@ mod tests {
         assert!(err.contains("older rustrawl"), "{err}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scope_copy_leaves_a_scope_already_in_the_perimeter_alone() {
+        let dir = std::env::temp_dir().join(format!("rustrawl-scopecopy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The scope lives where the copy would land: fs::copy truncates the
+        // destination before reading the source, so this used to wipe the
+        // operator's file to 0 bytes while reporting success.
+        std::fs::write(
+            dir.join("scope.yaml"),
+            "name: acme\nscan:\n  nmap_args: -sC -sV\n",
+        )
+        .unwrap();
+        save_scope_copy(&dir, &dir.join("scope.yaml")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scope.yaml")).unwrap(),
+            "name: acme\nscan:\n  nmap_args: -sC -sV\n"
+        );
+
+        // A scope outside still lands the copy, canonical paths or not.
+        let scope = dir.parent().unwrap().join("acme-scope.yaml");
+        std::fs::write(&scope, "name: outside\n").unwrap();
+        save_scope_copy(&dir, &scope).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scope.yaml")).unwrap(),
+            "name: outside\n"
+        );
+
+        // An alias of the destination (symlink) is the same file by inode:
+        // skip, don't truncate the shared inode through the link.
+        std::os::unix::fs::symlink(dir.join("scope.yaml"), dir.join("alias.yaml")).unwrap();
+        save_scope_copy(&dir, &dir.join("alias.yaml")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scope.yaml")).unwrap(),
+            "name: outside\n"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&scope).ok();
     }
 
     #[test]

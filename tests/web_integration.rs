@@ -1581,12 +1581,35 @@ fn capture_pass_shoots_the_registry_web_services() {
     ] {
         assert!(page.contains(key), "capture contract: {key} missing");
     }
-    for key in ["postCapture(", "capture this host", "capturing…"] {
-        assert!(
-            page.contains(key),
-            "per-asset capture contract: {key} missing"
-        );
+    for key in [
+        "postCapture(",
+        "capture this host",
+        "capturing…",
+        // the field-feedback round: display cap, search negation, the
+        // per-host rescan button
+        "limitSelect(",
+        "rescan this host now",
+        "scanning...",
+        "rescanned, ",
+        "rustrawl-show-services",
+        "rustrawl-show-hosts",
+        " - showing ",
+        "-port:22",
+        // the cap select borrows the dropdown's look through the .limit
+        // class, and the sheet's re-render stands down once the operator
+        // navigated away
+        "select.limit",
+        "if (live(seq)) renderHost",
+    ] {
+        assert!(page.contains(key), "dashboard contract: {key} missing");
     }
+    // the cap select must never carry the export dropdown's xsel marker:
+    // exportSelect keys its build-once guard on it, and a cap select
+    // wearing it once left every export unreachable on the tables
+    assert!(
+        !page.contains("limit xsel"),
+        "the cap select must not claim the export select's xsel marker"
+    );
 
     drop(child);
     fs::remove_dir_all(&root).ok();
@@ -1786,6 +1809,111 @@ fn filtered_exports_up_ips_and_live_output() {
     let (_, body) = get(port, "/api/status");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["run"], run_id, "{body}");
+
+    drop(child);
+    fs::remove_dir_all(&root).ok();
+}
+
+/// A resolved set past the 1024-host batch size: the POST no longer
+/// refuses. The server splits the job into sequential nmap batches inside
+/// one manual_<ts> run directory, the rows land batch by batch, the
+/// response reports the batch count, and the live-output endpoint answers
+/// the multi-chunk run.
+#[test]
+fn big_rescan_splits_into_sequential_batches() {
+    let root = temp_root("batch");
+    let scope_path = root.join("scope.yaml");
+    // 1022 + 254 loopback addresses: connect-mode refusals make them up
+    fs::write(
+        &scope_path,
+        "name: batch-it\nincludes:\n  - 127.2.0.0/22\n  - 127.2.4.0/24\ndiscovery:\n  rate_pps: 10000\n  ports: [39145]\n  icmp: false\n",
+    )
+    .unwrap();
+    let perim = root.join("perim");
+    let out = bin()
+        .args([
+            "run",
+            scope_path.to_str().unwrap(),
+            "--out",
+            perim.to_str().unwrap(),
+            "--mode",
+            "connect",
+        ])
+        .output()
+        .expect("run launches");
+    assert!(
+        out.status.success(),
+        "run failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (child, port, _stderr_reader) = spawn_dashboard(&perim, "batch", &[]);
+
+    // how many hosts the registry calls up: the same intersection the scan
+    // will resolve
+    let (status, body) = post(port, "/api/up-ips", r#"{"range":"127.2.0.0/16"}"#, false);
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let count = v["count"].as_u64().unwrap();
+    assert!(
+        count > 1024,
+        "the seed must cross the batch cap, got {count}"
+    );
+    assert_eq!(
+        count.div_ceil(1024),
+        2,
+        "the seed wants two batches, got {count}"
+    );
+
+    // the big POST: accepted, split, fully ingested
+    let (status, body) = post(port, "/api/scan", r#"{"range":"127.2.0.0/16"}"#, true);
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["count"], count, "{body}");
+    assert_eq!(v["batches"], 2, "{body}");
+    assert_eq!(v["open"], count, "{body}");
+    let run_id = v["run"].as_str().unwrap().to_string();
+
+    // one run directory, one chunk per batch, the job marked done
+    let run_dir = perim.join("runs").join(&run_id);
+    let scans = run_dir.join("scans");
+    for f in [
+        "chunk-0000.out",
+        "chunk-0000.gnmap",
+        "chunk-0001.out",
+        "chunk-0001.gnmap",
+        "chunk-0001.argv",
+    ] {
+        assert!(
+            scans.join(f).is_file(),
+            "{f} missing in {}",
+            scans.display()
+        );
+    }
+    let st: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("scan_state.json")).unwrap())
+            .unwrap();
+    assert_eq!(st["done"], true, "{st}");
+    let chunks = st["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 2, "{st}");
+    assert!(chunks.iter().all(|c| c["done"] == true), "{st}");
+
+    // the rows: every host carries the fake nmap's one open port, and the
+    // live-output endpoint answers the multi-chunk run (the newest chunk's
+    // tail)
+    let (_, body) = get(port, "/api/services");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["count"], count, "{body}");
+    let (status, body) = get(port, "/api/scan/output");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["run"], run_id, "{body}");
+    assert!(
+        v["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("fake nmap on")),
+        "{body}"
+    );
 
     drop(child);
     fs::remove_dir_all(&root).ok();

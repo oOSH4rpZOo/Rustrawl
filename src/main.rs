@@ -61,10 +61,13 @@ fn run(a: &cli::RunArgs) -> Result<()> {
     if scan_set.is_empty() {
         bail!("no scannable targets - the whole perimeter is in passive zones");
     }
-
     if a.dry_run {
         return dry_run(&scope, &all_targets, &scan_set, &a.out, a.mode, a.force);
     }
+    // The perimeter keeps its scope: the dashboard's scan-defaults fallback
+    // reads it before any queue run exists. After the dry-run branch, so a
+    // preview still creates nothing.
+    discovery::state::save_scope_copy(&a.out, &a.scope).context("keeping the scope copy")?;
     let code = discovery::run_all(&scope, &scan_set, &a.out, a.mode, a.resume, a.force)?;
     std::process::exit(code);
 }
@@ -594,10 +597,11 @@ pub(crate) fn render_services(w: &mut dyn std::io::Write, out: &Path, q: &SvcQue
     Ok(())
 }
 
-/// The rescan form's default: the newest scan run's recorded nmap args
-/// (`-sC -sV` when nothing ran yet) — the port list rides inside them.
-/// The dashboard's rescan box prefills from it and the console's
-/// `hosts -r` falls back to it — one reader, shared.
+/// The rescan form's default: the newest scan run's recorded nmap args,
+/// falling back to the perimeter's scope copy (`scan.nmap_args`), falling
+/// back to `-sC -sV` — the port list rides inside them. The dashboard's
+/// rescan box prefills from it and the console's `hosts -r` falls back to
+/// it — one reader, shared.
 pub(crate) fn scan_defaults(out: &Path) -> String {
     let mut latest: Option<std::path::PathBuf> = None;
     if let Ok(rd) = std::fs::read_dir(discovery::state::runs_dir(out)) {
@@ -619,13 +623,28 @@ pub(crate) fn scan_defaults(out: &Path) -> String {
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
     });
-    match state {
-        Some(v) => match v["nmap_args"].as_str() {
-            Some(a) if !a.trim().is_empty() => a.to_string(),
-            _ => "-sC -sV".to_string(),
-        },
-        None => "-sC -sV".to_string(),
+    match state.and_then(|v| v["nmap_args"].as_str().map(str::to_string)) {
+        // the newest queue run is the newest truth about what the operator
+        // scans with
+        Some(a) if !a.trim().is_empty() => a,
+        // no queue run yet (or an empty plan): the scope copy — written to
+        // the perimeter at every run/scan — is the next-best source
+        _ => scope_nmap_args(out).unwrap_or_else(|| "-sC -sV".to_string()),
     }
+}
+
+/// The scope copy's `scan.nmap_args`, when the copy exists, parses and
+/// carries a non-empty value. Anything else is `None` — the caller falls
+/// through to the bare default.
+fn scope_nmap_args(out: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(out.join("scope.yaml")).ok()?;
+    let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).ok()?;
+    v.get("scan")?
+        .get("nmap_args")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// One host, by IPv4 or by any collected hostname: `hosts -i dc01` and
@@ -800,7 +819,14 @@ pub(crate) fn rescan_host(
         bail!("{ip} is not an up host in this registry - a rescan re-probes known hosts");
     }
     writeln!(w, "scanning {ip} - nmap {args} - ctrl-c aborts")?;
-    let r = scan::manual_scan(out, std::slice::from_ref(&ip), &args)?;
+    // The console's brake is ABORT (SIGINT); the generation is read only
+    // to satisfy the shared signature - nothing here bumps it.
+    let r = scan::manual_scan(
+        out,
+        std::slice::from_ref(&ip),
+        &args,
+        scan::SCAN_GEN.load(std::sync::atomic::Ordering::Relaxed),
+    )?;
     writeln!(w, "run {} - {} open port(s)", r.run_id, r.open.len())?;
     for (port, name, version) in &r.open {
         writeln!(
@@ -1912,6 +1938,38 @@ fn dry_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_defaults_falls_back_to_the_scope_copy() {
+        let root = std::env::temp_dir().join(format!("rustrawl-scandef-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // nothing at all: the bare default
+        assert_eq!(scan_defaults(&root), "-sC -sV");
+        // the perimeter's scope copy answers before the bare default
+        std::fs::write(
+            root.join("scope.yaml"),
+            "name: x\nincludes: [10.0.0.0/8]\nscan:\n  nmap_args: \"-sV -p 1-100\"\n",
+        )
+        .unwrap();
+        assert_eq!(scan_defaults(&root), "-sV -p 1-100");
+        // an unparsable copy: back to the bare default
+        std::fs::write(root.join("scope.yaml"), "scan: [unclosed\n").unwrap();
+        assert_eq!(scan_defaults(&root), "-sC -sV");
+        // an empty args value in the copy: bare default too
+        std::fs::write(root.join("scope.yaml"), "scan:\n  nmap_args: \"   \"\n").unwrap();
+        assert_eq!(scan_defaults(&root), "-sC -sV");
+        // a queue run outranks the copy: it is the newer truth
+        let run = root.join("runs").join("scan_2026-10-09_120000");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(
+            run.join("scan_state.json"),
+            r#"{"nmap_args":"-sC -sV -p-"}"#,
+        )
+        .unwrap();
+        assert_eq!(scan_defaults(&root), "-sC -sV -p-");
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn csv_and_xml_escaping() {

@@ -628,24 +628,47 @@ fn ingest_chunk(
 /// nmap process is killed and the operator gets the capture path.
 const MANUAL_SCAN_CAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// The same brake for a multi-host batch. A killed run ingests nothing,
-/// so an undersized cap would throw away whole legitimate batches — a
-/// /24 with `-sC -sV -p-` legitimately outlives the single-host cap; the
-/// stop button stays the escape hatch.
+/// The same brake for a multi-host batch (applied per batch: a split job
+/// gets the full budget on every nmap invocation). A killed run ingests
+/// nothing, so an undersized cap would throw away whole legitimate
+/// batches — a /24 with `-sC -sV -p-` legitimately outlives the
+/// single-host cap; the stop button stays the escape hatch.
 const MANUAL_SCAN_CAP_MULTI: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-/// Backstop on a batch rescan's host count. Bigger jobs belong to the
-/// `scan` queue with its per-range profiles, not to one dashboard POST.
+/// One manual rescan batch's host count: a resolved set past this splits
+/// into sequential nmap invocations inside the one run directory (see
+/// `manual_scan`).
 pub(crate) const MANUAL_SCAN_MAX_HOSTS: usize = 1024;
+
+/// Backstop on a manual rescan's TOTAL host count — batches bound each
+/// nmap invocation, this bounds the job. Bigger jobs belong to the `scan`
+/// queue with its per-range profiles and its resume.
+pub(crate) const MANUAL_SCAN_MAX_TOTAL: usize = 8192;
+
+/// Splits the resolved set into sequential batches of at most
+/// `MANUAL_SCAN_MAX_HOSTS` hosts, order kept. Pure, so the split rules
+/// are testable without nmap.
+fn manual_batches(ips: &[Ipv4Addr]) -> Vec<&[Ipv4Addr]> {
+    ips.chunks(MANUAL_SCAN_MAX_HOSTS).collect()
+}
 
 /// The run id of the newest manual rescan, set the moment its run directory
 /// exists and left set after it finishes — the dashboard's live-output
-/// endpoint reads this to find `scans/chunk-0000.out`, and keeping it after
-/// completion means a page that navigated away still recovers the tail until
-/// the next scan overwrites it. Last writer wins: the SCANNING gate makes
-/// dashboard rescans exclusive, and the console's `hosts -r` writes it too.
+/// endpoint reads this to find the newest `scans/chunk-NNNN.out` (the last
+/// batch), and keeping it after completion means a page that navigated away
+/// still recovers the tail until the next scan overwrites it. Last writer
+/// wins: the SCANNING gate makes dashboard rescans exclusive, and the
+/// console's `hosts -r` writes it too.
 pub(crate) static CURRENT_MANUAL_RUN: std::sync::Mutex<Option<String>> =
     std::sync::Mutex::new(None);
+
+/// The dashboard stop button's brake: each manual job records this counter
+/// at start and treats any later change as its stop signal. Comparing
+/// beats clearing — a shared abort flag needs a pre-job clear, and that
+/// clear is either wiped by a racing refused POST or wipes a racing stop.
+/// The console never bumps it; its brake stays `ABORT` (SIGINT, the TUI's
+/// `q`).
+pub(crate) static SCAN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The manual frame's verbosity: `-v` makes nmap report each host as it
 /// completes instead of holding the whole report for the end, which is what
@@ -668,34 +691,59 @@ pub(crate) struct ManualScan {
     pub run_id: String,
     /// (port, service, version) of every open port nmap reported.
     pub open: Vec<(u16, String, String)>,
+    /// How many sequential nmap batches the job ran (1 unless the resolved
+    /// set crossed `MANUAL_SCAN_MAX_HOSTS`).
+    pub batches: usize,
 }
 
 /// One operator-triggered rescan (the dashboard's POST /api/scan and the
-/// console's `hosts -r`): nmap once over the given hosts — usually one,
-/// a batch for the dashboard's range and result-set rescans — the
+/// console's `hosts -r`): nmap over the given hosts — usually one, a
+/// batch for the dashboard's range and result-set rescans — the
 /// operator's arguments spliced into rustrawl's frame, the evidence in
 /// its own `manual_<date>_<time>` run directory and the rows ingested
-/// through the same core as a queue chunk. One nmap process either way:
-/// nmap parallelizes internally, so a batch never fans out into chunks.
-/// The frame adds `-v` (see `manual_frame_args`) so the captured
-/// `chunk-0000.out` reports each host live; the run id lands in
-/// `CURRENT_MANUAL_RUN` for the dashboard's output tail.
+/// through the same core as a queue chunk. A set past
+/// `MANUAL_SCAN_MAX_HOSTS` splits into sequential batches in that one
+/// directory (each batch still one nmap process — nmap parallelizes
+/// internally); the rows land batch by batch, and a stop or a timeout
+/// kills the current nmap without starting the next (the stop rides the
+/// `SCAN_GEN` generation, re-checked before every spawn and once more
+/// after the last ingest). The frame adds `-v`
+/// (see `manual_frame_args`) so the captured `chunk-NNNN.out` reports
+/// each host live; the run id lands in `CURRENT_MANUAL_RUN` for the
+/// dashboard's output tail.
 /// Synchronous — the caller's thread waits — and serialized by the
-/// perimeter lock, so a rescan never overlaps a real run.
-pub(crate) fn manual_scan(out: &Path, ips: &[Ipv4Addr], nmap_args: &str) -> Result<ManualScan> {
+/// perimeter lock, so a rescan never overlaps a real run. `gen` is the
+/// job's stop generation: the dashboard reads it under the lifecycle lock
+/// right after winning the SCANNING gate (see web::SCAN_GATE), so every
+/// later `SCAN_GEN` change is a stop aimed at this job; the console reads
+/// the counter too — nothing there bumps it, and its brake is `ABORT`.
+pub(crate) fn manual_scan(
+    out: &Path,
+    ips: &[Ipv4Addr],
+    nmap_args: &str,
+    gen: u64,
+) -> Result<ManualScan> {
     debug_assert!(!ips.is_empty(), "a rescan needs at least one host");
-    if ips.len() > MANUAL_SCAN_MAX_HOSTS {
+    if ips.len() > MANUAL_SCAN_MAX_TOTAL {
         bail!(
             "{} host(s) is past the {}-host rescan ceiling - bigger jobs belong to `rustrawl scan` with its profiles",
             ips.len(),
-            MANUAL_SCAN_MAX_HOSTS
+            MANUAL_SCAN_MAX_TOTAL
         );
     }
+    let batches = manual_batches(ips);
     let _lock = state::lock_perimeter(out)?;
     let run_id = state::stamped_id("manual");
     let run_dir = state::create_run(out, &run_id)?;
-    // The real id (same-second collisions suffix -2) goes up for the
-    // dashboard's live tail before any nmap byte moves.
+    // create_run may have suffixed the id ("-02") to keep two same-second
+    // runs apart — the state file, the ingested rows and the live-output
+    // tail all key on the directory's actual name, so carry it from here
+    // on.
+    let run_id = run_dir
+        .file_name()
+        .expect("create_run returned a named directory")
+        .to_string_lossy()
+        .into_owned();
     *CURRENT_MANUAL_RUN.lock().expect("manual run id mutex") = Some(run_id.clone());
     let scans_dir = run_dir.join("scans");
     std::fs::create_dir_all(&scans_dir)
@@ -706,15 +754,16 @@ pub(crate) fn manual_scan(out: &Path, ips: &[Ipv4Addr], nmap_args: &str) -> Resu
     state::log_line(
         &mut log,
         &format!(
-            "manual rescan of {} host(s): nmap args {nmap_args:?}",
-            ips.len()
+            "manual rescan of {} host(s) in {} batch(s): nmap args {nmap_args:?}",
+            ips.len(),
+            batches.len()
         ),
     );
 
-    // The evidence map first: a crash mid-scan leaves a state file that
-    // says the chunk is not done, and locate_host_chunk can already see
-    // the run (its chunk carries the host).
-    let hosts: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
+    // The evidence map first: one chunk per batch, none done yet — a crash
+    // mid-job leaves the pending batches marked undone, and
+    // locate_host_chunk can already see the run (each chunk carries its
+    // hosts).
     let u32s: Vec<u32> = ips.iter().map(|ip| u32::from(*ip)).collect();
     let mut st = ScanState {
         ports: Vec::new(),
@@ -726,81 +775,117 @@ pub(crate) fn manual_scan(out: &Path, ips: &[Ipv4Addr], nmap_args: &str) -> Resu
             nmap_args: nmap_args.to_string(),
         }],
         only: Vec::new(),
-        chunks: vec![Chunk {
-            hosts,
-            done: false,
-            attempts: 0,
-            skipped: false,
-            profile: 0,
-        }],
+        chunks: batches
+            .iter()
+            .map(|b| Chunk {
+                hosts: b.iter().map(|ip| ip.to_string()).collect(),
+                done: false,
+                attempts: 0,
+                skipped: false,
+                profile: 0,
+            })
+            .collect(),
         done: false,
     };
     write_scan_state(&run_dir, &st)?;
 
-    let mut child = spawn_chunk(
-        &nmap_bin()?,
-        &manual_frame_args(nmap_args),
-        &st.chunks[0],
-        0,
-        &scans_dir,
-        &mut log,
-    )?;
-    let started = std::time::Instant::now();
-    let cap = if ips.len() > 1 {
-        MANUAL_SCAN_CAP_MULTI
-    } else {
-        MANUAL_SCAN_CAP
-    };
-    let status = loop {
-        match child.try_wait()? {
-            Some(s) => break s,
-            None => {
-                if ABORT.load(Ordering::Relaxed) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!(
-                        "manual rescan of {} host(s): interrupted - capture in {scans_dir:?}",
-                        ips.len()
-                    );
-                }
-                if started.elapsed() > cap {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!(
-                        "manual rescan of {} host(s): nmap passed {}s - killed; capture in {}",
-                        ips.len(),
-                        cap.as_secs(),
-                        scans_dir.join("chunk-0000.out").display()
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-        }
-    };
-    if !status.success() {
-        bail!(
-            "manual rescan of {} host(s): nmap exited {status} - capture in {}",
-            ips.len(),
-            scans_dir.join("chunk-0000.out").display()
-        );
-    }
-
+    let nmap = nmap_bin()?;
     let mut db = Db::open(out)?;
     db.set_run_id(&run_id);
-    let parsed = ingest_gnmap(&mut db, &scans_dir, 0, &mut log)?;
-    st.chunks[0].done = true;
+    let mut open = Vec::new();
+    // The caller's stop generation: any SCAN_GEN change from here on is a
+    // stop that landed after this job started - every check below can
+    // bail honestly.
+    let stopped = || ABORT.load(Ordering::Relaxed) || SCAN_GEN.load(Ordering::Relaxed) != gen;
+    for (i, batch) in batches.iter().enumerate() {
+        // A stop landing in the previous batch's ingest must not spawn
+        // another nmap; one landing after the last ingest still ends the
+        // job interrupted, not 200-OK.
+        if stopped() {
+            bail!(
+                "manual rescan of {} host(s): interrupted during batch {} of {} - capture in {scans_dir:?}",
+                ips.len(),
+                i + 1,
+                batches.len()
+            );
+        }
+        let mut child = spawn_chunk(
+            &nmap,
+            &manual_frame_args(nmap_args),
+            &st.chunks[i],
+            i,
+            &scans_dir,
+            &mut log,
+        )?;
+        let started = std::time::Instant::now();
+        let cap = if batch.len() > 1 {
+            MANUAL_SCAN_CAP_MULTI
+        } else {
+            MANUAL_SCAN_CAP
+        };
+        let status = loop {
+            match child.try_wait()? {
+                Some(s) => break s,
+                None => {
+                    if stopped() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        bail!(
+                            "manual rescan of {} host(s): interrupted during batch {} of {} - capture in {scans_dir:?}",
+                            ips.len(),
+                            i + 1,
+                            batches.len()
+                        );
+                    }
+                    if started.elapsed() > cap {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        bail!(
+                            "manual rescan of {} host(s): batch {} of {} passed {}s - killed; capture in {}",
+                            ips.len(),
+                            i + 1,
+                            batches.len(),
+                            cap.as_secs(),
+                            scans_dir.join(format!("chunk-{i:04}.out")).display()
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        };
+        if !status.success() {
+            bail!(
+                "manual rescan of {} host(s): batch {} of {} nmap exited {status} - capture in {}",
+                ips.len(),
+                i + 1,
+                batches.len(),
+                scans_dir.join(format!("chunk-{i:04}.out")).display()
+            );
+        }
+        // Rows land batch by batch: a long job is readable from the
+        // dashboard while later batches still run, and an interrupted job
+        // keeps what its finished batches found.
+        let parsed = ingest_gnmap(&mut db, &scans_dir, i, &mut log)?;
+        open.extend(parsed.into_iter().flat_map(|h| {
+            h.ports
+                .into_iter()
+                .map(move |p| (p.port, p.service, p.version))
+        }));
+        st.chunks[i].done = true;
+        write_scan_state(&run_dir, &st)?;
+    }
+    if stopped() {
+        bail!(
+            "manual rescan of {} host(s): interrupted after the last batch - capture in {scans_dir:?}",
+            ips.len()
+        );
+    }
     st.done = true;
     write_scan_state(&run_dir, &st)?;
     Ok(ManualScan {
         run_id,
-        open: parsed
-            .into_iter()
-            .flat_map(|h| {
-                h.ports
-                    .into_iter()
-                    .map(move |p| (p.port, p.service, p.version))
-            })
-            .collect(),
+        open,
+        batches: batches.len(),
     })
 }
 
@@ -1108,6 +1193,10 @@ pub fn run(args: &ScanArgs) -> Result<()> {
 
     // From here on the scan writes: perimeter lock, then the run directory —
     // fresh per invocation (scan_<date>_<time>), or the interrupted queue.
+    // The perimeter keeps its scope (the dashboard's scan-defaults fallback
+    // reads it before any queue run exists); after the dry-run branch, so
+    // a preview still creates nothing.
+    state::save_scope_copy(&args.out, &args.scope).context("keeping the scope copy")?;
     let _lock = state::lock_perimeter(&args.out)?;
     let (run_dir, mut st) = if args.resume {
         let dir = resume_dir.expect("resume checked above");
@@ -1672,6 +1761,14 @@ pub(crate) fn read_scan_state(run_dir: &Path) -> Result<ScanState> {
     Ok(st)
 }
 
+/// Whether the run's queue finished — the live-output endpoint's honesty
+/// check: a held perimeter lock alone cannot tell a still-running manual
+/// job from a capture or a queue scan, the state file can. Absent or
+/// unreadable state reads as finished: an idle tail, not a scanning one.
+pub(crate) fn scan_state_done(run_dir: &Path) -> bool {
+    read_scan_state(run_dir).map(|st| st.done).unwrap_or(true)
+}
+
 fn write_scan_state(run_dir: &Path, st: &ScanState) -> Result<()> {
     let path = run_dir.join("scan_state.json");
     let tmp = run_dir.join("scan_state.json.tmp");
@@ -1688,6 +1785,35 @@ fn write_scan_state(run_dir: &Path, st: &ScanState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_batches_split_at_the_cap() {
+        let ip = |i: u32| Ipv4Addr::from([10, 0, (i / 254) as u8, (i % 254 + 1) as u8]);
+        // one host, one batch
+        let one: Vec<_> = (0..1u32).map(ip).collect();
+        let b = manual_batches(&one);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].len(), 1);
+        // exactly the cap: one batch
+        let exact: Vec<_> = (0..MANUAL_SCAN_MAX_HOSTS as u32).map(ip).collect();
+        let b = manual_batches(&exact);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].len(), MANUAL_SCAN_MAX_HOSTS);
+        // one past the cap: the split, order kept
+        let over: Vec<_> = (0..(MANUAL_SCAN_MAX_HOSTS + 1) as u32).map(ip).collect();
+        let b = manual_batches(&over);
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].len(), MANUAL_SCAN_MAX_HOSTS);
+        assert_eq!(b[1].len(), 1);
+        assert_eq!(b[1][0], ip(MANUAL_SCAN_MAX_HOSTS as u32));
+        // a mission-sized set splits cleanly
+        let spread: Vec<_> = (0..2500u32).map(ip).collect();
+        let b = manual_batches(&spread);
+        assert_eq!(
+            b.iter().map(|b| b.len()).collect::<Vec<_>>(),
+            vec![1024, 1024, 452]
+        );
+    }
 
     #[test]
     fn gnmap_parsing() {

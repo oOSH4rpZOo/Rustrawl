@@ -7,11 +7,13 @@
 //! read while a scan writes). The writes are the operator's marks — triage
 //! (`POST /api/triage`) and the manual asset type (`POST /api/type`) — the
 //! same rows the CLI sets, plus one deliberate escalation: `POST /api/scan`
-//! runs nmap once over targets the registry picks — one already-up host, an
+//! runs nmap over targets the registry picks — one already-up host, an
 //! explicit ip list, or every up host in a range — with operator-typed
 //! arguments inside rustrawl's frame (`check_nmap_args` keeps targets and
-//! output files pinned — the same rules as the CLI), and `POST /api/scan/stop`
-//! is the brake on it: flip the shared abort flag. Scan verdicts stay
+//! output files pinned — the same rules as the CLI); a set past 1024 hosts
+//! becomes sequential nmap batches in the one run directory, and
+//! `POST /api/scan/stop` is the brake on it: bump the job's stop
+//! generation. Scan verdicts stay
 //! untouchable otherwise; the rescan writes through the same ingest core as
 //! a queue chunk and lands its evidence in its own `manual_<date>_<time>`
 //! run directory. The write routes demand a custom `X-Rustrawl: 1` header:
@@ -61,6 +63,14 @@ const LOGO: &[u8] = include_bytes!("logo.png");
 /// True while a manual rescan's watch loop is waiting on nmap - the stop
 /// endpoint answers 409 without it, so the button never fires blind.
 static SCANNING: AtomicBool = AtomicBool::new(false);
+
+/// Serializes the scan lifecycle: winning the SCANNING gate and reading
+/// the job's stop generation happen under this lock, and so does the stop
+/// endpoint's bump - so no bump can land between a job's gate and its
+/// generation read (that stop would be swallowed) and no read can miss a
+/// bump that was never aimed at it. Held for microseconds at a time;
+/// never while a job runs.
+static SCAN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn serve(out: &Path, bind: IpAddr, port: u16) -> Result<()> {
     // Fail on a typo'd perimeter before binding, like every other db view.
@@ -988,10 +998,11 @@ fn scan_defaults(out: &Path) -> serde_json::Value {
     serde_json::json!({ "args": crate::scan_defaults(out) })
 }
 
-/// The third write: nmap once over a target set the registry resolves —
+/// The third write: nmap over a target set the registry resolves —
 /// one already-up host (`{ip}`), an explicit list (`{ips}`), or every up
 /// host in a range (`{range}`) — with operator-typed arguments inside
-/// rustrawl's frame. Validation happens before anything spawns; the run
+/// rustrawl's frame; a set past `MANUAL_SCAN_MAX_HOSTS` hosts becomes
+/// sequential nmap batches in one run directory (see `manual_scan`). Validation happens before anything spawns; the run
 /// itself carries the perimeter lock (one scan per perimeter — a rescan
 /// during a real run is a 409, not a queue jump). Synchronous: the
 /// response lands when the rows do, so a dropped connection costs the
@@ -1081,18 +1092,23 @@ fn scan_post(out: &Path, body: &[u8]) -> Result<serde_json::Value, Response> {
             "no up host in this set - a rescan re-probes known hosts".to_string(),
         ));
     }
-    if resolved.len() > crate::scan::MANUAL_SCAN_MAX_HOSTS {
+    if resolved.len() > crate::scan::MANUAL_SCAN_MAX_TOTAL {
         return Err(bad(format!(
             "{} host(s) is past the {}-host rescan ceiling - bigger jobs belong to `rustrawl scan` with its profiles",
             resolved.len(),
-            crate::scan::MANUAL_SCAN_MAX_HOSTS
+            crate::scan::MANUAL_SCAN_MAX_TOTAL
         )));
     }
 
     // One dashboard scan at a time: the flag is the gate (a second POST
     // is refused before it can touch the perimeter lock), the lock inside
-    // manual_scan is the cross-process truth. A stale abort (an earlier
-    // stop) must not kill this scan at its first 200 ms tick.
+    // manual_scan is the cross-process truth. Winning the gate and reading
+    // this job's stop generation share the lifecycle lock: the stop
+    // endpoint bumps under the same lock, so a stop either precedes the
+    // gate (nothing running - its 409, and no bump to inherit) or follows
+    // it (bumps aim at this job, and the watch loop sees the change).
+    // Nothing to clear either way - a refused POST touches no stop.
+    let _life = SCAN_GATE.lock().unwrap_or_else(|e| e.into_inner());
     if SCANNING
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
         .is_err()
@@ -1103,8 +1119,9 @@ fn scan_post(out: &Path, body: &[u8]) -> Result<serde_json::Value, Response> {
             "a scan is already running on this dashboard\n",
         ));
     }
-    crate::discovery::ABORT.store(false, Ordering::Relaxed);
-    let r = crate::scan::manual_scan(out, &resolved, &args);
+    let gen = crate::scan::SCAN_GEN.load(Ordering::Relaxed);
+    drop(_life);
+    let r = crate::scan::manual_scan(out, &resolved, &args, gen);
     SCANNING.store(false, Ordering::Relaxed);
     let r = r.map_err(|e| {
         let msg = format!("{e:#}");
@@ -1130,6 +1147,7 @@ fn scan_post(out: &Path, body: &[u8]) -> Result<serde_json::Value, Response> {
         "count": resolved.len(),
         "skipped": skipped,
         "run": r.run_id,
+        "batches": r.batches,
         "open": r.open.len(),
     }))
 }
@@ -1302,16 +1320,74 @@ fn up_ips_post(out: &Path, body: &[u8]) -> std::result::Result<serde_json::Value
 /// walking the file.
 const TAIL_BYTES: u64 = 64 * 1024;
 
+/// The run's most recent capture: the highest-numbered chunk-*.out present.
+/// A multi-batch rescan spawns its batches sequentially, so the newest
+/// file is the current (or last) batch, and a batch's file only exists
+/// once its nmap starts - the live tail follows the job without extra
+/// state.
+fn last_chunk_idx(scans_dir: &Path) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    if let Ok(rd) = std::fs::read_dir(scans_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(idx) = name
+                .strip_prefix("chunk-")
+                .and_then(|r| r.strip_suffix(".out"))
+                .and_then(|r| r.parse::<usize>().ok())
+            {
+                if best.is_none_or(|b| idx > b) {
+                    best = Some(idx);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// The newest manual_* run directory, by name order (stamped ids sort
+/// chronologically, and `create_run` pads its collision suffix so even
+/// `-10` sorts after `-02`). A dashboard restart loses the in-memory run
+/// id; this keeps the live-output endpoint answering across one.
+fn newest_manual_run(out: &Path) -> Option<String> {
+    let mut best: Option<String> = None;
+    if let Ok(rd) = std::fs::read_dir(crate::discovery::state::runs_dir(out)) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("manual_") && best.as_ref().is_none_or(|b| name > *b) {
+                best = Some(name);
+            }
+        }
+    }
+    best
+}
+
+/// Whether another process holds the perimeter lock right now — the CLI's
+/// run/scan, a console rescan. `SCANNING` only knows this dashboard's own
+/// process, and the live-output fallback exists to answer across one, so
+/// the probe keeps `running` truthful: a tail fed by someone else's job
+/// reads as scanning, a finished one as idle. Non-blocking — the probe
+/// takes the lock and drops it at once, so it never delays (or steals
+/// from) a real job.
+fn perimeter_busy(out: &Path) -> bool {
+    use fs2::FileExt;
+    // Read-only open: flock takes LOCK_EX on read fds, and a probe must
+    // not create or truncate the lock file it is only sniffing at.
+    let Ok(f) = std::fs::File::open(out.join("run.lock")) else {
+        return false; // no lock file - nobody could hold it
+    };
+    f.try_lock_exclusive().is_err()
+}
+
 /// The newest manual rescan's captured output. The run id stays set after
 /// completion, so a page that navigated away recovers the tail until the
 /// next scan overwrites it; a missing capture is an empty text, not an
 /// error - the file appears the moment nmap starts writing.
-fn out_tail(out: &Path, run: &str) -> (u64, String) {
+fn out_tail(out: &Path, run: &str, idx: usize) -> (u64, String) {
     use std::io::{Read, Seek, SeekFrom};
     let path = crate::discovery::state::runs_dir(out)
         .join(run)
         .join("scans")
-        .join("chunk-0000.out");
+        .join(format!("chunk-{idx:04}.out"));
     let mut f = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(_) => return (0, String::new()),
@@ -1327,21 +1403,44 @@ fn out_tail(out: &Path, run: &str) -> (u64, String) {
 }
 
 fn scan_output_json(out: &Path) -> serde_json::Value {
-    let run = crate::scan::CURRENT_MANUAL_RUN
+    // While SCANNING, the in-memory id is this dashboard's own live job.
+    // Idle, the newest manual run on disk answers: a console `hosts -r`
+    // may have created newer runs the dashboard should show (and follow,
+    // through the state check below), which a finished dashboard run's
+    // in-memory id must not shadow. A restart losing the id changes
+    // nothing - that run is on disk.
+    let mem = crate::scan::CURRENT_MANUAL_RUN
         .lock()
         .ok()
         .and_then(|g| g.clone());
+    let scanning = SCANNING.load(Ordering::Relaxed);
+    let run = if scanning {
+        mem
+    } else {
+        newest_manual_run(out).or(mem)
+    };
     match run {
         Some(run) => {
-            let (size, text) = out_tail(out, &run);
+            let scans = crate::discovery::state::runs_dir(out)
+                .join(&run)
+                .join("scans");
+            let idx = last_chunk_idx(&scans).unwrap_or(0);
+            let (size, text) = out_tail(out, &run, idx);
+            // running: this dashboard's job, or someone else's manual job
+            // still unfinished on the perimeter. A finished run behind a
+            // held lock - a capture, a queue scan - is idle news, not
+            // scanning: the probe alone cannot tell who holds the lock,
+            // the run's state file can.
+            let done =
+                crate::scan::scan_state_done(&crate::discovery::state::runs_dir(out).join(&run));
             serde_json::json!({
                 "run": run,
-                "running": SCANNING.load(Ordering::Relaxed),
+                "running": scanning || (!done && perimeter_busy(out)),
                 "size": size,
                 "text": text,
                 // the command this run is executing - the tab shows it above
                 // the live output
-                "cmd": crate::evidence::run_chunk_cmd(out, &run, 0),
+                "cmd": crate::evidence::run_chunk_cmd(out, &run, idx),
             })
         }
         None => serde_json::json!({
@@ -1350,15 +1449,19 @@ fn scan_output_json(out: &Path) -> serde_json::Value {
     }
 }
 
-/// The brake for the manual rescan: flip the shared abort flag the watch
-/// loop polls - nmap is killed within its 200 ms tick and the pending
-/// POST /api/scan answers with the interruption, capture left on disk.
+/// The brake for the manual rescan: bump scan::SCAN_GEN — the running job
+/// compares its start generation and bails on any change, so nmap is
+/// killed within its 200 ms tick (or never spawns the next batch) and the
+/// pending POST /api/scan answers with the interruption, capture left on
+/// disk. The bump rides the lifecycle lock (see SCAN_GATE), so it can
+/// never slip between a starting job's gate and its generation read.
 /// Nothing running: a 409, so the button never fires blind.
 fn scan_stop_post() -> Response {
     if !SCANNING.load(Ordering::Relaxed) {
         return Response::text(409, "Conflict", "no scan is running\n");
     }
-    crate::discovery::ABORT.store(true, Ordering::Relaxed);
+    let _life = SCAN_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    crate::scan::SCAN_GEN.fetch_add(1, Ordering::Relaxed);
     Response::json(&serde_json::json!({ "ok": true }))
 }
 
@@ -1527,11 +1630,11 @@ fn capture_post(out: &Path, body: &[u8]) -> Result<serde_json::Value, Response> 
             crate::capture::MAX_CAPTURE_TARGETS
         )));
     }
-    // A stale abort from an earlier stop must not kill this pass at tick
-    // one — cleared exactly like the rescan does.
-    crate::discovery::ABORT.store(false, Ordering::Relaxed);
     // One capture per perimeter: the lock is the cross-process truth (the
-    // CLI pass, a scan, another dashboard click).
+    // CLI pass, a scan, another dashboard click). No abort clear here —
+    // the only writer of that flag in this process is SIGINT, the rescan
+    // stop rides scan::SCAN_GEN, so a pending stop is never wiped by a
+    // refused capture click.
     let _lock = match crate::discovery::state::lock_perimeter(out) {
         Ok(l) => l,
         Err(e) => {
@@ -2759,13 +2862,17 @@ mod tests {
         assert_eq!(v["size"], (TAIL_BYTES + 100));
         assert_eq!(v["text"].as_str().unwrap().len(), TAIL_BYTES as usize);
 
-        // a run id with no capture on disk: empty tail, not an error
+        // a run id with no capture on disk: empty tail, not an error (the
+        // in-memory id wins while the job holds SCANNING - its run dir may
+        // not exist yet, a fresh job writes its captures next)
+        SCANNING.store(true, Ordering::Relaxed);
         *crate::scan::CURRENT_MANUAL_RUN.lock().unwrap() = Some("manual_run2".to_string());
         let resp = route("GET", "/api/scan/output", &out);
         let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
         assert_eq!(v["run"], "manual_run2");
         assert_eq!(v["size"], 0);
         assert_eq!(v["text"], "");
+        SCANNING.store(false, Ordering::Relaxed);
 
         // the running command: the chunk's .argv capture, one line
         std::fs::write(
@@ -2800,6 +2907,78 @@ mod tests {
     }
 
     #[test]
+    fn scan_output_falls_back_to_the_newest_manual_run_on_disk() {
+        let _guard = TEST_RUN_LOCK.lock().unwrap();
+        let out = temp_perim("scanout-fallback");
+        // a manual run on disk, the in-memory id empty (a dashboard restart
+        // wiped it): the endpoint still answers, with the newest chunk's
+        // tail - a multi-batch job stays readable across the restart
+        let scans = crate::discovery::state::runs_dir(&out)
+            .join("manual_2026-10-09_120000")
+            .join("scans");
+        std::fs::create_dir_all(&scans).unwrap();
+        std::fs::write(scans.join("chunk-0000.out"), "batch one\n").unwrap();
+        std::fs::write(scans.join("chunk-0001.out"), "batch two\n").unwrap();
+        crate::scan::CURRENT_MANUAL_RUN.lock().unwrap().take();
+        let resp = route("GET", "/api/scan/output", &out);
+        let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
+        assert_eq!(v["run"], "manual_2026-10-09_120000", "{v}");
+        assert_eq!(v["text"], "batch two\n", "{v}");
+
+        // a live dashboard job (SCANNING) outranks the disk fallback
+        *crate::scan::CURRENT_MANUAL_RUN.lock().unwrap() =
+            Some("manual_2026-10-09_110000".to_string());
+        SCANNING.store(true, Ordering::Relaxed);
+        let resp = route("GET", "/api/scan/output", &out);
+        let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
+        assert_eq!(v["run"], "manual_2026-10-09_110000", "{v}");
+
+        // idle, an OLDER in-memory id must not shadow the disk's newer run:
+        // a console `hosts -r` that ran since keeps the answer
+        SCANNING.store(false, Ordering::Relaxed);
+        let resp = route("GET", "/api/scan/output", &out);
+        let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
+        assert_eq!(v["run"], "manual_2026-10-09_120000", "{v}");
+        crate::scan::CURRENT_MANUAL_RUN.lock().unwrap().take();
+    }
+
+    #[test]
+    fn scan_output_keeps_running_truthful_across_processes() {
+        let _guard = TEST_RUN_LOCK.lock().unwrap();
+        let out = temp_perim("scanout-busy");
+        // an UNFINISHED manual run on disk (its state file says so), this
+        // dashboard idle: the lock is free, the tail sits idle
+        let run_dir = crate::discovery::state::runs_dir(&out).join("manual_2026-10-09_120000");
+        let scans = run_dir.join("scans");
+        std::fs::create_dir_all(&scans).unwrap();
+        std::fs::write(scans.join("chunk-0000.out"), "batch one\n").unwrap();
+        std::fs::write(
+            run_dir.join("scan_state.json"),
+            r#"{"ports":[],"nmap_args":"","queue_hash":0,"chunks":[{"hosts":["127.0.0.5"],"done":false,"attempts":0,"skipped":false}],"done":false}"#,
+        )
+        .unwrap();
+        crate::scan::CURRENT_MANUAL_RUN.lock().unwrap().take();
+        SCANNING.store(false, Ordering::Relaxed);
+        let v: serde_json::Value =
+            serde_json::from_str(&body(&route("GET", "/api/scan/output", &out))).unwrap();
+        assert_eq!(v["running"], false, "{v}");
+
+        // another holder of run.lock running that job (a console rescan):
+        // the answer flips to running so the tab keeps polling instead of
+        // reading the tail as stalled - the lock probe is the cross-
+        // process truth SCANNING cannot see, the state file keeps a
+        // finished run (a capture's hold) from reading the same way
+        let _lock = crate::discovery::state::lock_perimeter(&out).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&body(&route("GET", "/api/scan/output", &out))).unwrap();
+        assert_eq!(v["running"], true, "{v}");
+        drop(_lock);
+        let v: serde_json::Value =
+            serde_json::from_str(&body(&route("GET", "/api/scan/output", &out))).unwrap();
+        assert_eq!(v["running"], false, "{v}");
+    }
+
+    #[test]
     fn scan_post_batch_shapes_refuse_before_spawning() {
         let post = |out: &std::path::Path, b: &[u8]| route_req("POST", "/api/scan", b, true, out);
         let out = seeded("scanbatch");
@@ -2825,20 +3004,23 @@ mod tests {
         let empty = temp_perim("scanbatch-empty");
         assert!(body(&post(&empty, br#"{"range":"127.0.0.0/8"}"#)).contains("no registry here"));
 
-        // the ceiling: 1030 sweep-up hosts under one /8 → refused with the cap named
+        // the ceiling: past 8192 sweep-up hosts the POST is refused with
+        // the cap named (1024 per batch, 8 batches the job bound). The
+        // acceptance path — a set that splits — lives in the integration
+        // test where nmap is fake; here it must refuse BEFORE spawning.
         let big = temp_perim("scanbatch-big");
         {
             use crate::discovery::db::Stage;
             let mut db = Db::open(&big).unwrap();
             db.set_run_id("big_test");
-            for i in 0..1030u32 {
+            for i in 0..8300u32 {
                 let ip = Ipv4Addr::from([127, 2, (i / 254) as u8, (i % 254 + 1) as u8]);
                 db.record_host(ip, Stage::Sweep, true, 2);
             }
             db.flush().unwrap();
         }
         let t = body(&post(&big, br#"{"range":"127.0.0.0/8"}"#));
-        assert!(t.contains("past the 1024-host rescan ceiling"), "{t}");
+        assert!(t.contains("past the 8192-host rescan ceiling"), "{t}");
 
         // the guard header: 403 and no run directory created — nothing spawned
         let before = std::fs::read_dir(crate::discovery::state::runs_dir(&out))
