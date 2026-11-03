@@ -51,14 +51,19 @@ const IMAGE_CAP: u64 = 5 * 1024 * 1024;
 /// the filter should narrow first.
 const EXPORT_CAP: u64 = 4 * 1024 * 1024;
 
-/// The embedded dashboard page (vanilla JS, the project's white identity:
-/// navy and orange on white, the logo served alongside).
+/// The embedded dashboard page (vanilla JS, the project's identity: navy
+/// and orange in both themes, the logos served alongside).
 const PAGE: &str = include_str!("web.html");
 
 /// The project logo, served at /logo.png for the banner emblem and the
 /// favicon (a hand-downscaled copy of the root's master PNG
 /// `rustrawl_logo.png`).
 const LOGO: &[u8] = include_bytes!("logo.png");
+
+/// The dark theme's emblem, served at /logo-dark.png: the same mark
+/// re-inked with the dark palette's pale blue and brighter orange, since
+/// the light emblem's navy drowns on the dark surface.
+const LOGO_DARK: &[u8] = include_bytes!("logo-dark.png");
 
 /// True while a manual rescan's watch loop is waiting on nmap - the stop
 /// endpoint answers 409 without it, so the button never fires blind.
@@ -328,6 +333,7 @@ fn route_req(method: &str, path: &str, body: &[u8], x_rustrawl: bool, out: &Path
     match (method, path) {
         ("GET", "/") => Response::html(PAGE.to_string()),
         ("GET", "/logo.png") => Response::png(LOGO),
+        ("GET", "/logo-dark.png") => Response::png(LOGO_DARK),
         ("GET", "/api/hosts") => match hosts_json(out) {
             Ok(v) => Response::json(&v),
             Err(e) => Response::server_error(e),
@@ -2193,6 +2199,19 @@ mod tests {
     fn the_logo_serves_as_a_static_png() {
         let out = temp_perim("logo");
         let resp = route("GET", "/logo.png", &out);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.content_type, "image/png");
+        assert!(
+            resp.body.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "the embedded asset is a PNG: {} bytes",
+            resp.body.len()
+        );
+    }
+
+    #[test]
+    fn the_dark_logo_serves_as_a_static_png() {
+        let out = temp_perim("logodark");
+        let resp = route("GET", "/logo-dark.png", &out);
         assert_eq!(resp.status, 200);
         assert_eq!(resp.content_type, "image/png");
         assert!(

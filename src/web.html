@@ -5,6 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rustrawl</title>
 <link rel="icon" href="/logo.png">
+<script>
+  // Resolve the theme before first paint: the stored choice, else the
+  // system preference. Small and synchronous, here in the head, so the
+  // page never flashes the wrong palette.
+  (function () {
+    var t;
+    try { t = localStorage.getItem("rustrawl-theme"); } catch (e) {}
+    if (t !== "dark" && t !== "light") {
+      t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark" : "light";
+    }
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
 <style>
   /* White identity, the logo's own palette: navy #021e3b, orange #e23600. */
   :root {
@@ -13,8 +27,24 @@
     --accent: #e23600; --accent-dark: #c22f00; --accent-soft: #fdeee7;
     --ok: #1a8f4d; --warn: #b7791f; --red: #d13438;
     --pwned: #111; /* the compromise mark: black in every theme and state */
+    --badge-line: #f4c7ae; --kind-line: #c9d7e6; --kind-bg: #eef3f9;
     --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   }
+  /* Night identity: the same two inks, re-inked for a dark surface. The
+     pale blue and the brighter orange are exactly logo-dark.png's colors,
+     hover feedback brightens there instead of darkening, and --pwned
+     flips to near-white: its light-theme black would drown here. */
+  :root[data-theme="dark"] {
+    --bg: #121820; --soft: #1a2230; --fg: #d3dbe3; --navy: #9cc3ea; --dim: #8794a3;
+    --line: #2a3644; --line2: #212c38; --zebra: #161d26;
+    --accent: #ff4d24; --accent-dark: #ff6a42; --accent-soft: rgba(226, 54, 0, .18);
+    --ok: #34b269; --warn: #d9a53f; --red: #e5534b;
+    --pwned: #ececec;
+    --badge-line: #5a2412; --kind-line: #33465c; --kind-bg: #1d2937;
+  }
+  :root[data-theme="dark"] ::selection { background: #0d3a66; color: #fff; }
+  :root[data-theme="dark"] .rangerow:hover { box-shadow: 0 3px 14px rgba(0, 0, 0, .45); }
+  :root[data-theme="dark"] .pwndot.on { box-shadow: 0 0 0 3px rgba(255, 255, 255, .14); }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
@@ -29,6 +59,25 @@
     overflow-y: auto; /* a short window scrolls the column, the column stays put */
   }
   aside#side .logo { width: 100%; display: block; }
+  /* The banner head: emblem left, theme toggle right. Two logo files swap
+     on the theme attribute, since the light emblem's navy ink would drown
+     on the dark surface. */
+  .brandrow { display: flex; align-items: center; gap: 12px; }
+  aside#side .brandrow .logo { width: auto; flex: 1 1 0; min-width: 0; }
+  aside#side .logo.dark { display: none; }
+  :root[data-theme="dark"] aside#side .logo { display: none; }
+  :root[data-theme="dark"] aside#side .logo.dark { display: block; }
+  .themebtn {
+    flex: none; width: 30px; height: 30px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: none; border: 1px solid var(--line); border-radius: 8px;
+    color: var(--dim); cursor: pointer;
+    transition: border-color .12s ease, color .12s ease;
+  }
+  .themebtn:hover { border-color: var(--navy); color: var(--navy); }
+  .themebtn .icon-sun { display: none; }
+  :root[data-theme="dark"] .themebtn .icon-moon { display: none; }
+  :root[data-theme="dark"] .themebtn .icon-sun { display: block; }
   nav { display: flex; flex-direction: column; gap: 2px; }
   nav a {
     color: var(--dim); text-decoration: none; padding: 8px 12px;
@@ -240,8 +289,8 @@
     border: 1px solid var(--line); background: var(--soft); font: 11px var(--mono);
     color: var(--fg);
   }
-  .badge.kind { border-color: #c9d7e6; color: var(--navy); background: #eef3f9; font-weight: 600; }
-  a.badge { color: var(--accent); text-decoration: none; border-color: #f4c7ae; background: var(--accent-soft); }
+  .badge.kind { border-color: var(--kind-line); color: var(--navy); background: var(--kind-bg); font-weight: 600; }
+  a.badge { color: var(--accent); text-decoration: none; border-color: var(--badge-line); background: var(--accent-soft); }
   a.badge:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
 
   .triage { max-width: 640px; }
@@ -314,7 +363,7 @@
   }
   .captile img {
     width: 100%; height: auto; border-radius: 4px;
-    border: 1px solid var(--line); background: #fff;
+    border: 1px solid var(--line); background: #fff; /* screenshots are white pages, both themes */
   }
   .capurl { font: 12px/1.4 var(--mono); color: var(--navy); word-break: break-all; }
   .captitle { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -343,6 +392,8 @@
       border-bottom: 1px solid var(--line);
     }
     aside#side .logo { width: 34px; }
+    aside#side .brandrow .logo { width: 34px; flex: 0 0 auto; }
+    aside#side .brandrow { gap: 8px; }
     nav { flex-direction: row; margin-left: auto; }
     aside .perim { display: none; }
     main { margin-left: 0; padding: 12px 14px 60px; }
@@ -352,7 +403,14 @@
 </head>
 <body>
 <aside id="side">
-  <img class="logo" src="/logo.png" alt="rustrawl">
+  <div class="brandrow">
+    <img class="logo" src="/logo.png" alt="rustrawl">
+    <img class="logo dark" src="/logo-dark.png" alt="rustrawl">
+    <button class="themebtn" id="themebtn" type="button" title="toggle dark mode" aria-label="toggle dark mode">
+      <svg class="icon-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+    </button>
+  </div>
   <nav>
     <a href="#/ranges" id="tab-ranges">ranges</a>
     <a href="#/services" id="tab-services">services</a>
@@ -2089,6 +2147,15 @@ async function route() {
     if (renderSeq <= claimed + 1) $view.replaceChildren(el("div", errText(e), "empty"));
   }
 }
+// Theme toggle: the head script already resolved the theme (stored choice,
+// else the system preference) before first paint, so this only flips it
+// and remembers the choice.
+const THEME_KEY = "rustrawl-theme";
+document.getElementById("themebtn").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem(THEME_KEY, next); } catch {}
+});
 window.addEventListener("hashchange", () => {
   prevHash = curHash;
   curHash = location.hash;

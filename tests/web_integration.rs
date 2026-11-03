@@ -358,6 +358,12 @@ fn web_dashboard_serves_the_registry_over_http() {
         body.contains("renderRanges") && body.contains("\"ranges\""),
         "the ranges view ships in the JS: {body:?}"
     );
+    // the theme toggle ships: the head pre-paint resolver, the dark token
+    // block, the button and the dark emblem
+    assert!(body.contains("rustrawl-theme"), "{body:?}");
+    assert!(body.contains("[data-theme=\"dark\"]"), "{body:?}");
+    assert!(body.contains("id=\"themebtn\""), "{body:?}");
+    assert!(body.contains("logo-dark.png"), "{body:?}");
     // the fielded search ships in the JS: the query parser (port ranges,
     // quoted values) and the per-view matchers over the new column set
     for key in [
