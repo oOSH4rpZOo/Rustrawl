@@ -369,6 +369,11 @@ fn web_dashboard_serves_the_registry_over_http() {
     assert!(body.contains("rustrawl-ports-services"), "{body:?}");
     assert!(body.contains("portpick-panel"), "{body:?}");
     assert!(body.contains("hitPort(p, ranges)"), "{body:?}");
+    // the sheet's copy buttons (with the plain-http clipboard fallback)
+    // and the filter slug in the export file names
+    assert!(body.contains("copyText"), "{body:?}");
+    assert!(body.contains("execCommand"), "{body:?}");
+    assert!(body.contains("filterSlug()"), "{body:?}");
     // the fielded search ships in the JS: the query parser (port ranges,
     // quoted values) and the per-view matchers over the new column set
     for key in [

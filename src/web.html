@@ -209,6 +209,14 @@
   .back:hover { color: var(--navy); border-color: var(--navy); }
   .ship { font: 600 20px var(--mono); color: var(--navy); }
   .shnames { color: var(--dim); font-family: var(--mono); font-size: 12.5px; }
+  /* The sheet's copy buttons: small, mono, quiet; they flash what they
+     did ("copied") the way the queue buttons do. */
+  .copybtn {
+    background: none; border: 1px solid var(--line); border-radius: 6px;
+    padding: 2px 8px; font: 11px var(--mono); color: var(--dim);
+    cursor: pointer; flex: none;
+  }
+  .copybtn:hover { border-color: var(--navy); color: var(--navy); }
   .shpwn { color: var(--pwned); font-weight: 700; font-size: 16px; }
 
   /* State marks: the round pastille (click cycles). One vocabulary, host
@@ -504,6 +512,30 @@ function flashQueued(btn, text) {
   btn.textContent = text;
   btn.dataset.flash = "1";
   setTimeout(() => { btn.textContent = orig; delete btn.dataset.flash; }, 1200);
+}
+// Clipboard write with a plain-http fallback: the dashboard often serves
+// over LAN http, where navigator.clipboard does not exist (no secure
+// context) - execCommand still copies there. The button itself says what
+// happened ("copied" / "copy failed") for a beat, like the queue buttons.
+function copyText(t, btn) {
+  const done = ok => flashQueued(btn, ok ? "copied" : "copy failed");
+  const legacy = () => {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch {}
+    ta.remove();
+    return ok;
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(t).then(() => done(true), () => done(legacy()));
+  } else {
+    done(legacy());
+  }
 }
 let rescanHosts = loadRescanQueue();
 let rescanLogText = "", rescanFinal = null, rescanRunId = null, rescanArgsDefaults = null;
@@ -1712,6 +1744,15 @@ function rangeRow(r) {
   return row;
 }
 
+// The download name carries the query: the filter becomes a
+// filename-safe slug ("port-80-8080-ssh"), so passes under different
+// filters do not overwrite each other in the downloads folder. No
+// filter keeps the plain "-displayed" names.
+function filterSlug() {
+  return filter.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/g, "");
+}
+
 async function renderServices() {
   const seq = claim();
   const data = await api("/api/services");
@@ -1744,15 +1785,17 @@ async function renderServices() {
     (shown.length < rows.length ? ` - showing ${shown.length}` : "");
   // Exports on the right end of the bar: the rows as displayed in three
   // serializations, or those hosts' nmap XML from the registry.
+  const xname = ext => "rustrawl-services-" + (filterSlug() || "displayed") + "." + ext;
   exportSelect(bar, [
     ["csv", () => postExport("/api/export/services.csv",
-      { rows: displayedSvc }, "rustrawl-services-displayed.csv")],
+      { rows: displayedSvc }, xname("csv"))],
     ["txt", () => postExport("/api/export/services.txt",
-      { rows: displayedSvc }, "rustrawl-services-displayed.txt")],
+      { rows: displayedSvc }, xname("txt"))],
     ["xml", () => postExport("/api/export/services.xml",
-      { rows: displayedSvc }, "rustrawl-services-displayed.xml")],
+      { rows: displayedSvc }, xname("xml"))],
     ["scan.xml", () => postExport("/api/export/scan.xml",
-      { ips: [...new Set(displayedSvc.map(r => r.ip))] }, "rustrawl-scan-displayed.xml")],
+      { ips: [...new Set(displayedSvc.map(r => r.ip))] },
+      "rustrawl-scan-" + (filterSlug() || "displayed") + ".xml")],
   ]);
   queueRescanBtn(bar, () => displayedSvc.map(r => r.ip));
   showBelow(bar);
@@ -1843,15 +1886,17 @@ async function renderHosts() {
   bar.querySelector(".count").textContent =
     `${rows.length} host(s) of ${data.count}` + (hidden ? ` (${hidden} hidden)` : "") +
     (shown.length < rows.length ? ` - showing ${shown.length}` : "");
+  const xname = ext => "rustrawl-hosts-" + (filterSlug() || "displayed") + "." + ext;
   exportSelect(bar, [
     ["txt", () => postExport("/api/export/hosts.txt",
-      { ips: displayedHosts }, "rustrawl-hosts-displayed.txt")],
+      { ips: displayedHosts }, xname("txt"))],
     ["csv", () => postExport("/api/export/services.csv",
-      { ips: displayedHosts }, "rustrawl-hosts-displayed.csv")],
+      { ips: displayedHosts }, xname("csv"))],
     ["xml", () => postExport("/api/export/services.xml",
-      { ips: displayedHosts }, "rustrawl-hosts-displayed.xml")],
+      { ips: displayedHosts }, xname("xml"))],
     ["scan.xml", () => postExport("/api/export/scan.xml",
-      { ips: displayedHosts }, "rustrawl-scan-displayed.xml")],
+      { ips: displayedHosts },
+      "rustrawl-scan-" + (filterSlug() || "displayed") + ".xml")],
   ]);
   queueRescanBtn(bar, () => displayedHosts);
   showBelow(bar);
@@ -1906,8 +1951,18 @@ async function renderHost(ip) {
   const head = el("div", null, "sheethead");
   head.appendChild(back);
   head.appendChild(el("span", ip, "ship"));
+  const cpIp = el("button", "copy", "copybtn");
+  cpIp.title = "copy the ip";
+  cpIp.onclick = () => copyText(ip, cpIp);
+  head.appendChild(cpIp);
   const names = [...new Set((h.names ?? []).map(n => n.name))];
-  if (names.length) head.appendChild(el("span", names.join(", "), "shnames"));
+  if (names.length) {
+    head.appendChild(el("span", names.join(", "), "shnames"));
+    const cpNames = el("button", "copy", "copybtn");
+    cpNames.title = "copy the hostnames";
+    cpNames.onclick = () => copyText(names.join(", "), cpNames);
+    head.appendChild(cpNames);
+  }
   if (h.pwned) {
     const pw = el("span", "☠", "shpwn");
     pw.title = "PW3ND - marked compromised";
