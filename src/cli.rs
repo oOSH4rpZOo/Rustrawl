@@ -125,6 +125,11 @@ pub struct ScanArgs {
     /// longer ago than this window (e.g. 30d, 12h). Default: every up host
     #[arg(long)]
     pub refresh_after: Option<String>,
+    /// Queue every up host: the scope's scan.refresh_after window is
+    /// ignored for this run. Fresh queues only: --resume re-applies the
+    /// interrupted queue as recorded
+    #[arg(long)]
+    pub force: bool,
     /// Simulate the queue without launching nmap
     #[arg(long)]
     pub dry_run: bool,

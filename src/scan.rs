@@ -965,8 +965,24 @@ pub fn run(args: &ScanArgs) -> Result<()> {
              recorded selection - resume without it, or start without --resume"
         );
     }
+    // The same house rule for --force: it shapes a fresh queue, an
+    // interrupted queue re-applies itself as recorded.
+    if args.resume && args.force {
+        bail!(
+            "--force shapes a fresh queue; the interrupted queue re-applies its own \
+             recorded selection - resume without it, or start without --resume"
+        );
+    }
+    // A window narrows the queue, --force un-narrows it: the two never
+    // travel together.
+    if args.force && args.refresh_after.is_some() {
+        bail!(
+            "--force queues every up host; --refresh-after narrows the queue - pass one, not both"
+        );
+    }
     // Incremental window: CLI overrides the YAML; None = full queue.
-    let (refresh_after, refresh_after_s) = match &args.refresh_after {
+    // --force short-circuits both windows: every up host, this run only.
+    let (mut refresh_after, mut refresh_after_s) = match &args.refresh_after {
         Some(s) => {
             let d = crate::util::parse_duration(s).context("--refresh-after")?;
             if d.is_zero() {
@@ -979,6 +995,15 @@ pub fn run(args: &ScanArgs) -> Result<()> {
             scope.scan.refresh_after.clone(),
         ),
     };
+    if args.force {
+        refresh_after = None;
+        refresh_after_s = None;
+        if scope.scan.refresh_after.is_some() {
+            eprintln!(
+                "note: --force queues every up host - the scope's refresh window is ignored for this run"
+            );
+        }
+    }
 
     let all_targets =
         Targets::build(&scope.includes, &scope.excludes).context("resolving targets")?;
@@ -1012,6 +1037,19 @@ pub fn run(args: &ScanArgs) -> Result<()> {
     let remembered = db.scan_queue(refresh_after)?;
     let ups_bitmap = &remembered & scan_set.as_bitmap();
     if ups_bitmap.is_empty() {
+        if refresh_after.is_some() {
+            // the window may have eaten the queue: distinguish a registry
+            // that still holds up hosts (the window refuses to requeue
+            // them) from one that has none, before advising
+            let all_up = db.scan_queue(None)?;
+            if !(&all_up & scan_set.as_bitmap()).is_empty() {
+                bail!(
+                    "every up host was scanned within the refresh window ({}) - \
+                     --force queues them all, or widen scan.refresh_after",
+                    refresh_after_s.as_deref().unwrap_or("?")
+                );
+            }
+        }
         bail!(
             "no up hosts in the registry for this perimeter - run `rustrawl run` (discovery) first"
         );

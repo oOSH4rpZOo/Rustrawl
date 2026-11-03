@@ -747,6 +747,120 @@ fn scan_profiles_split_the_queue_and_resume() {
     fs::remove_dir_all(&root).ok();
 }
 
+/// A stricter nmap stand-in for the window test: every host reports ports,
+/// so every host lands a phase-C row (the shared stand-in leaves most
+/// hosts mute, and a mute host requeues within any window by design -
+/// "scanned but mute: always worth another pass").
+const FAKE_NMAP_ALLPORT: &str = r#"#!/usr/bin/env bash
+set -u
+base=""
+hosts=()
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [[ "${args[$i]}" == "-oA" ]]; then
+    base="${args[$((i + 1))]}"
+  fi
+done
+for a in "${args[@]}"; do
+  if [[ "$a" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    hosts+=("$a")
+  fi
+done
+: > "$base.gnmap"
+: > "$base.nmap"
+for h in "${hosts[@]}"; do
+  printf 'Host: %s ()\tStatus: Up\n' "$h" >> "$base.gnmap"
+  printf 'Host: %s ()\tPorts: 39145/open/tcp//svc//every host reports ports\tIgnored State: closed (1)\n' "$h" >> "$base.gnmap"
+  printf 'Nmap scan report for %s\nHost is up (0.001s latency).\n' "$h" >> "$base.nmap"
+  printf 'Nmap scan report for %s\nHost is up (0.001s latency).\n' "$h"
+done
+"#;
+
+/// The scope's refresh window and --force: after one pass the window
+/// covers every host, a second pass says exactly that (not "no up
+/// hosts"), --force queues them all again, and the contradictory flag
+/// pairs are refused. Loopback only.
+#[test]
+fn scan_force_overrides_the_scope_refresh_window() {
+    let root = temp_root("force");
+    let scope_path = root.join("scope.yaml");
+    // a 30-day window: once scanned, every host is fresh for a month
+    let mut scope = SCOPE.to_string();
+    scope.push_str("  refresh_after: 30d\n");
+    fs::write(&scope_path, scope).unwrap();
+    let fake_nmap = root.join("fake-nmap-all");
+    fs::write(&fake_nmap, FAKE_NMAP_ALLPORT).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_nmap, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let perim = run_discovery(&root, &scope_path);
+    let scan = |extra: &[&str]| {
+        bin()
+            .arg("scan")
+            .arg(scope_path.to_str().unwrap())
+            .arg("--out")
+            .arg(perim.to_str().unwrap())
+            .args(extra)
+            .env("RUSTRAWL_NMAP_BIN", &fake_nmap)
+            .output()
+            .expect("scan launches")
+    };
+    let text = |o: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+
+    // ---- the first pass scans everyone; the window now covers them ----
+    let out = scan(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+
+    // ---- a second pass refuses, and the error names the real cause ----
+    let out = scan(&["--dry-run"]);
+    assert!(!out.status.success(), "the fresh queue must refuse");
+    let t = text(&out);
+    assert!(
+        t.contains("every up host was scanned within the refresh window (30d)"),
+        "{t}"
+    );
+    assert!(t.contains("--force queues them all"), "{t}");
+
+    // ---- --force queues everyone again ----
+    let out = scan(&["--dry-run", "--force"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let dry = text(&out);
+    assert!(dry.contains("64 up host(s)"), "{dry}");
+    assert!(
+        dry.contains("the scope's refresh window is ignored"),
+        "{dry}"
+    );
+    assert!(
+        !dry.contains("Incremental"),
+        "no window line under --force: {dry}"
+    );
+
+    // ---- the contradictory and resume pairings refuse ----
+    let out = scan(&["--dry-run", "--force", "--refresh-after", "30d"]);
+    assert!(
+        !out.status.success(),
+        "force and a window never travel together"
+    );
+    assert!(text(&out).contains("pass one, not both"), "{}", text(&out));
+    let out = scan(&["--resume", "--force"]);
+    assert!(!out.status.success(), "force is a fresh-queue shape");
+    assert!(
+        text(&out).contains("--force shapes a fresh queue"),
+        "{}",
+        text(&out)
+    );
+
+    fs::remove_dir_all(&root).ok();
+}
+
 /// `--only-profile <server /32>`: a fresh queue holding exactly one host —
 /// the bare-IP form selects the /32 profile by range equality.
 #[test]
