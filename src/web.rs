@@ -2229,6 +2229,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
         assert_eq!(v["count"], 2);
         assert_eq!(v["hosts"][0]["stages"], "scan");
+        // the open-port list rides along for the dashboard's port picker
+        // and the port: search key on hosts
+        assert!(v["hosts"][0]["ports"].is_array(), "{}", body(&resp));
 
         let resp = route("GET", "/api/services", &out);
         let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();

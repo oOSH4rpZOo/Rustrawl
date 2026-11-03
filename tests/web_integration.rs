@@ -364,6 +364,11 @@ fn web_dashboard_serves_the_registry_over_http() {
     assert!(body.contains("[data-theme=\"dark\"]"), "{body:?}");
     assert!(body.contains("id=\"themebtn\""), "{body:?}");
     assert!(body.contains("logo-dark.png"), "{body:?}");
+    // the port picker ships: the per-tab picks (persisted like the caps),
+    // the panel, and the hosts-side port key in the query language
+    assert!(body.contains("rustrawl-ports-services"), "{body:?}");
+    assert!(body.contains("portpick-panel"), "{body:?}");
+    assert!(body.contains("hitPort(p, ranges)"), "{body:?}");
     // the fielded search ships in the JS: the query parser (port ranges,
     // quoted values) and the per-view matchers over the new column set
     for key in [

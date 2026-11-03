@@ -45,6 +45,7 @@
   :root[data-theme="dark"] ::selection { background: #0d3a66; color: #fff; }
   :root[data-theme="dark"] .rangerow:hover { box-shadow: 0 3px 14px rgba(0, 0, 0, .45); }
   :root[data-theme="dark"] .pwndot.on { box-shadow: 0 0 0 3px rgba(255, 255, 255, .14); }
+  :root[data-theme="dark"] .portpick-panel { box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
@@ -59,16 +60,15 @@
     overflow-y: auto; /* a short window scrolls the column, the column stays put */
   }
   aside#side .logo { width: 100%; display: block; }
-  /* The banner head: emblem left, theme toggle right. Two logo files swap
-     on the theme attribute, since the light emblem's navy ink would drown
-     on the dark surface. */
-  .brandrow { display: flex; align-items: center; gap: 12px; }
-  aside#side .brandrow .logo { width: auto; flex: 1 1 0; min-width: 0; }
+  /* Two logo files swap on the theme attribute, since the light emblem's
+     navy ink would drown on the dark surface. The toggle sits at the foot
+     of the column, under the perimeter line. */
   aside#side .logo.dark { display: none; }
   :root[data-theme="dark"] aside#side .logo { display: none; }
   :root[data-theme="dark"] aside#side .logo.dark { display: block; }
   .themebtn {
-    flex: none; width: 30px; height: 30px; padding: 0;
+    align-self: flex-start; margin-top: 12px;
+    width: 30px; height: 30px; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
     background: none; border: 1px solid var(--line); border-radius: 8px;
     color: var(--dim); cursor: pointer;
@@ -104,6 +104,34 @@
   .count { color: var(--dim); font-family: var(--mono); font-size: 12px; }
   .dim { color: var(--dim); }
   .empty { color: var(--dim); font-family: var(--mono); padding: 26px 0; }
+  /* The multi-port picker: a bar button that opens a checkbox panel over
+     the ports the data actually has. Tokens only, so it follows both
+     themes for free. */
+  .portpick { position: relative; }
+  .portpick-btn {
+    background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 8px; padding: 7px 12px; font-family: var(--mono);
+    font-size: 13px; cursor: pointer;
+  }
+  .portpick-btn:hover { border-color: var(--navy); }
+  .portpick-panel {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+    min-width: 140px; max-width: 280px; max-height: 300px; overflow: auto;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(2, 30, 59, .14);
+    padding: 8px;
+  }
+  .portpick-panel label {
+    display: flex; gap: 8px; align-items: center; padding: 3px 6px;
+    border-radius: 6px; font: 12.5px var(--mono); cursor: pointer;
+    white-space: nowrap;
+  }
+  .portpick-panel label:hover { background: var(--soft); }
+  .portpick-clear {
+    background: none; border: none; padding: 5px 6px 2px; cursor: pointer;
+    font: 11px var(--mono); color: var(--dim); text-align: left;
+  }
+  .portpick-clear:hover { color: var(--red); }
 
   h2 {
     font: 600 11.5px var(--mono); color: var(--dim); text-transform: uppercase;
@@ -392,8 +420,7 @@
       border-bottom: 1px solid var(--line);
     }
     aside#side .logo { width: 34px; }
-    aside#side .brandrow .logo { width: 34px; flex: 0 0 auto; }
-    aside#side .brandrow { gap: 8px; }
+    aside#side .themebtn { margin-top: 0; align-self: auto; }
     nav { flex-direction: row; margin-left: auto; }
     aside .perim { display: none; }
     main { margin-left: 0; padding: 12px 14px 60px; }
@@ -403,14 +430,8 @@
 </head>
 <body>
 <aside id="side">
-  <div class="brandrow">
-    <img class="logo" src="/logo.png" alt="rustrawl">
-    <img class="logo dark" src="/logo-dark.png" alt="rustrawl">
-    <button class="themebtn" id="themebtn" type="button" title="toggle dark mode" aria-label="toggle dark mode">
-      <svg class="icon-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-      <svg class="icon-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-    </button>
-  </div>
+  <img class="logo" src="/logo.png" alt="rustrawl">
+  <img class="logo dark" src="/logo-dark.png" alt="rustrawl">
   <nav>
     <a href="#/ranges" id="tab-ranges">ranges</a>
     <a href="#/services" id="tab-services">services</a>
@@ -419,6 +440,10 @@
     <a href="#/capture" id="tab-capture">capture</a>
   </nav>
   <span class="perim" id="perim"></span>
+  <button class="themebtn" id="themebtn" type="button" title="toggle dark mode" aria-label="toggle dark mode">
+    <svg class="icon-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    <svg class="icon-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+  </button>
 </aside>
 <main id="view"></main>
 <script>
@@ -506,6 +531,24 @@ function saveShow(key, v) {
 }
 let showSvc = loadShow(SHOW_KEYS.services);
 let showHosts = loadShow(SHOW_KEYS.hosts);
+
+// The port picks: one set per tab, persisted like the display caps. An
+// empty set means no port filter at all.
+const PORT_KEYS = { services: "rustrawl-ports-services", hosts: "rustrawl-ports-hosts" };
+function loadPorts(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return Array.isArray(v) && v.length <= 1024
+      && v.every(n => Number.isInteger(n) && n >= 1 && n <= 65535)
+      ? new Set(v) : new Set();
+  } catch { return new Set(); }
+}
+function savePorts(view) {
+  try {
+    localStorage.setItem(PORT_KEYS[view], JSON.stringify([...selPorts[view]].sort((a, b) => a - b)));
+  } catch {}
+}
+let selPorts = { services: loadPorts(PORT_KEYS.services), hosts: loadPorts(PORT_KEYS.hosts) };
 
 // The triage vocabulary: one mark per host, todo (orange) / clean (green)
 // / vuln (red), cycled none → todo → vuln → clean → none. Marks live on
@@ -1076,7 +1119,7 @@ function filterBar(id, base, placeholder, apply, segFn) {
   input.placeholder = placeholder;
   // the grammar in one line - the query-language comment in the source
   // carries the full text
-  input.title = "AND of tokens - key:value over port (lists and ranges: port:22,80,1000-2000), host/ip, name, version, state, type, pwned, tag, open; quote values with spaces; a leading - excludes: -ssh, -port:22";
+  input.title = "AND of tokens - key:value over port (lists and ranges: port:22,80,1000-2000; on hosts, any open port), host/ip, name, version, state, type, pwned, tag, open; quote values with spaces; a leading - excludes: -ssh, -port:22";
   const sync = () => {
     filter = input.value;
     // segFn lets a view carry extra hash state (the ranges home's
@@ -1123,12 +1166,78 @@ function limitSelect(bar, get, set) {
   return sel;
 }
 
+// The multi-port picker, built once per bar (it rides the cached bar like
+// the limit select and the hide-empty switch) and re-synced each render:
+// the checkbox list redraws only when the data's port set changed, so an
+// open panel keeps its scroll position while the operator checks boxes.
+// `allPorts` hands over the ports the current search matched, ignoring the
+// picks - the list must not narrow itself down to what is already picked.
+function portSelect(bar, view, allPorts, onChange) {
+  let wrap = bar.querySelector(".portpick");
+  if (!wrap) {
+    wrap = el("div", null, "portpick");
+    const btn = el("button", null, "portpick-btn");
+    btn.type = "button";
+    btn.title = "filter the rows to the checked ports - nothing checked means no port filter";
+    btn.onclick = () => {
+      const p = wrap.querySelector(".portpick-panel");
+      p.hidden = !p.hidden;
+    };
+    const panel = el("div", null, "portpick-panel");
+    panel.hidden = true;
+    const list = el("div", null, "portpick-list");
+    list.dataset.sig = "";
+    panel.appendChild(list);
+    const clear = el("button", "clear", "portpick-clear");
+    clear.type = "button";
+    clear.onclick = () => { selPorts[view].clear(); savePorts(view); onChange(); };
+    panel.appendChild(clear);
+    wrap.appendChild(btn);
+    wrap.appendChild(panel);
+    bar.insertBefore(wrap, bar.querySelector("select.limit") || bar.querySelector(".count"));
+  }
+  const set = selPorts[view];
+  // picked ports stay listed even when the data no longer has them, so a
+  // stale pick can be unchecked instead of hiding rows silently
+  const ports = [...new Set([...allPorts(), ...set])].sort((a, b) => a - b);
+  const list = wrap.querySelector(".portpick-list");
+  const sig = ports.join(",");
+  if (list.dataset.sig !== sig) {
+    list.replaceChildren(...ports.map(p => {
+      const lab = el("label");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.value = String(p);
+      cb.onchange = () => {
+        if (cb.checked) set.add(p); else set.delete(p);
+        savePorts(view);
+        onChange();
+      };
+      lab.appendChild(cb);
+      lab.appendChild(el("span", String(p)));
+      return lab;
+    }));
+    list.dataset.sig = sig;
+  }
+  list.querySelectorAll("input").forEach(cb => {
+    cb.checked = set.has(Number(cb.value));
+  });
+  const picked = [...set].sort((a, b) => a - b);
+  wrap.querySelector(".portpick-btn").textContent = picked.length
+    ? `ports ${picked.slice(0, 3).join(", ")}${picked.length > 3 ? ` +${picked.length - 3}` : ""}`
+    : "ports";
+  // nothing to pick and nothing picked: the button has nothing to offer
+  wrap.hidden = !ports.length;
+  return wrap;
+}
+
 // ---- the query language -----------------------------------------------------
 // A filter string is whitespace-separated tokens, all of which must match
 // (AND). A token with a leading "-" negates: -ssh, -port:22, -name:"win rpc"
 // — everything the token would have kept is dropped instead. `key:value`
 // limits one field — port takes lists and inclusive ranges
-// (port:22,80,1000-2000); host/ip, name/service, version/info/banner
+// (port:22,80,1000-2000; a service matches its own port, a host matches
+// when any open port is in the set); host/ip, name/service, version/info/banner
 // are substrings (quote a value to keep its spaces: name:"win rpc");
 // proto/protocol and state check the constant columns; state:/type: filter
 // the operator's triage marks and the asset types. A bare term is a
@@ -1255,6 +1364,13 @@ function hostTok(t, r) {
       const ranges = portRanges(t.val);
       return ranges === null ? null
         : ranges.some(([lo, hi]) => r.open_ports >= lo && r.open_ports <= hi);
+    }
+    // port:80,3306 or port:1000-2000: the host has ANY of the listed
+    // ports open - the row's ports list, the same ranges grammar as the
+    // services side
+    case "port": case "ports": {
+      const ranges = portRanges(t.val);
+      return ranges === null ? null : (r.ports ?? []).some(p => hitPort(p, ranges));
     }
     case "state": return stateIs(r, v);
     case "type": return typeIs(r, v);
@@ -1601,11 +1717,17 @@ async function renderServices() {
   const data = await api("/api/services");
   if (!live(seq)) return;
   const match = svcMatcher(filter);
-  const rows = data.services.filter(r => !match || match(r));
+  // the port picks cut the searched rows (the picker's list reads these
+  // pre-pick rows, so it never narrows down to the selection itself)
+  const prePort = data.services.filter(r => !match || match(r));
+  const rows = selPorts.services.size
+    ? prePort.filter(r => selPorts.services.has(r.port))
+    : prePort;
   const bar = filterBar("bar-services", "/services", "search", renderServices);
   const input = bar.querySelector("input");
   if (document.activeElement !== input) input.value = filter;
   limitSelect(bar, () => showSvc, v => { showSvc = v; saveShow(SHOW_KEYS.services, v); renderServices(); });
+  portSelect(bar, "services", () => prePort.map(r => r.port), renderServices);
   const cols = [
     { key: "ip", label: "host" },
     { key: "port", label: "port", numeric: true, render: (v, r) => portBadge(r.ip, r.port, r.name) },
@@ -1634,7 +1756,14 @@ async function renderServices() {
   ]);
   queueRescanBtn(bar, () => displayedSvc.map(r => r.ip));
   showBelow(bar);
-  if (!rows.length) { showBelow(bar, el("div", "no service row matches.", "empty")); return; }
+  if (!rows.length) {
+    showBelow(bar, el("div",
+      prePort.length
+        ? `no service row on the picked ports - the search alone matched ${prePort.length}.`
+        : "no service row matches.",
+      "empty"));
+    return;
+  }
   dataTable($view, cols, shown, row => { location.hash = "#/host/" + row.ip; }, "services");
 }
 
@@ -1643,9 +1772,16 @@ async function renderHosts() {
   const data = await api("/api/hosts");
   if (!live(seq)) return;
   const match = hostMatcher(filter);
-  // the no-port hosts hide behind the checkbox, the pwned lead by
-  // default, then ip order (a header click re-sorts on top of this order)
-  const rows = data.hosts.filter(r => (!match || match(r)) && (!hideNoPort || r.open_ports > 0))
+  // the no-port hosts hide behind the checkbox, the port picks cut the
+  // searched rows on top (any open port in the picks); the picker's list
+  // reads these pre-pick rows, so it never narrows down to the selection
+  const prePort = data.hosts
+    .filter(r => (!match || match(r)) && (!hideNoPort || r.open_ports > 0));
+  const rows = (selPorts.hosts.size
+    ? prePort.filter(r => (r.ports ?? []).some(p => selPorts.hosts.has(p)))
+    : prePort)
+    // pwned leads by default, then ip order (a header click re-sorts on
+    // top of this order)
     .sort((a, b) => (b.pwned ? 1 : 0) - (a.pwned ? 1 : 0)
       || a.ip.localeCompare(b.ip));
   const bar = filterBar("bar-hosts", "/hosts", "search", renderHosts);
@@ -1667,6 +1803,11 @@ async function renderHosts() {
   }
   hw.querySelector("input").checked = hideNoPort;
   limitSelect(bar, () => showHosts, v => { showHosts = v; saveShow(SHOW_KEYS.hosts, v); renderHosts(); });
+  portSelect(bar, "hosts", () => {
+    const s = new Set();
+    prePort.forEach(r => (r.ports ?? []).forEach(p => s.add(p)));
+    return [...s];
+  }, renderHosts);
   const cols = [
     { key: "pwned", label: "pw3nd", val: r => (r.pwned ? 0 : 1),
       render: (v, r) => pwnedDot(r.ip, !!r.pwned) },
@@ -1716,7 +1857,9 @@ async function renderHosts() {
   showBelow(bar);
   if (!rows.length) {
     showBelow(bar, el("div",
-      hidden ? `no host with open ports - ${hidden} hidden by the checkbox` : "no host matches.",
+      prePort.length
+        ? `no host on the picked ports - the search alone matched ${prePort.length}.`
+        : (hidden ? `no host with open ports - ${hidden} hidden by the checkbox` : "no host matches."),
       "empty"));
     return;
   }
@@ -2155,6 +2298,13 @@ document.getElementById("themebtn").addEventListener("click", () => {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   document.documentElement.dataset.theme = next;
   try { localStorage.setItem(THEME_KEY, next); } catch {}
+});
+// A click anywhere outside an open port picker closes it. The toggle
+// button lives inside the picker, so its own click never lands here.
+document.addEventListener("click", e => {
+  document.querySelectorAll(".portpick-panel").forEach(p => {
+    if (!p.hidden && !p.parentElement.contains(e.target)) p.hidden = true;
+  });
 });
 window.addEventListener("hashchange", () => {
   prevHash = curHash;
