@@ -57,7 +57,7 @@ Everything discovered stays inside `includes` minus `excludes`, always.
 rustrawl run  scope.yaml --out data/acme [--mode auto|syn|connect] [--resume] [--force] [--dry-run]
 rustrawl scan scope.yaml --out data/acme [--nmap-args "..."] [--profile "range=args"] [--threads 4]
 rustrawl names --out data/acme [--dns ip:port] [--zone domain] [--domain domain] [--sources dns,tls,ldap]
-rustrawl web  --out data/acme [--timeout 7] [--threads 4]
+rustrawl web  --out data/acme [--timeout 7] [--threads 4] [--resume]
 rustrawl db   --out data/acme              # interactive console
 rustrawl db   --out data/acme stats        # counts + run outcomes
 rustrawl db   --out data/acme export       # the registry as nmap XML on stdout
@@ -114,6 +114,11 @@ Targets come from the registry, never probed into existence. Needs a
 chromium-family browser (`RUSTRAWL_CHROME_BIN` or PATH) and `curl`
 (`RUSTRAWL_CURL_BIN`). Without a browser the row still carries headers,
 title and fingerprint. Identical screenshots are deduplicated by SHA-256.
+No target cap: a pass over a big registry runs to completion, `^C` is
+safe and `web --resume` finishes the interrupted pass into the same run
+(failed targets retried, dedup intact). Progress prints every 50
+completions. `--threads` goes up to 32; the dashboard's per-asset
+capture stays bounded at 512 targets per host.
 
 ## Read the results
 

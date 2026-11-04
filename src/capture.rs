@@ -27,7 +27,11 @@
 //! Targets: every registry service on a host that is currently up, where
 //! name/port classifies as http or https (same predicate as the dashboard's
 //! own links — a dead host is never probed, mirroring the names pass).
-//! Caps keep a mistyped scope honest: 512 targets, 30 minutes, 16 threads.
+//! No cap and no wall clock: a pass over a big registry runs to
+//! completion — `^C` is safe and `--resume` finishes an interrupted pass
+//! (failed targets included) into the same run directory, dedup intact.
+//! Progress rides stderr every 50 completions; the dashboard's per-asset
+//! click stays bounded per asset, bulk work belongs to this CLI.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -54,8 +58,9 @@ pub(crate) const SIGNATURES: &str = include_str!("capture_signatures.txt");
 pub(crate) const STATE_FILE: &str = "cap_state.json";
 pub(crate) const MANIFEST_FILE: &str = "targets.jsonl";
 
-pub(crate) const MAX_CAPTURE_TARGETS: usize = 512;
-const CAPTURE_TOTAL_CAP: Duration = Duration::from_secs(30 * 60);
+/// The dashboard's per-asset capture click stays bounded (one asset's web
+/// set); the CLI pass has no cap — `^C` plus `--resume` is the safety net.
+pub(crate) const MAX_PER_ASSET_TARGETS: usize = 512;
 /// Extra wait on top of the timeout before a child is killed — the timeout
 /// is a promise to the target, the slack is patience for process teardown.
 const KILL_SLACK: Duration = Duration::from_secs(3);
@@ -65,10 +70,14 @@ pub(crate) const DEFAULT_THREADS: usize = 4;
 /// Same story as DEFAULT_THREADS: `web --timeout`'s default and the
 /// per-asset route's budget are the same promise to the target.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 7;
-const MAX_THREADS: usize = 16;
+/// Screenshot workers at once — each is one chromium process at a time.
+const MAX_THREADS: usize = 32;
 /// State is rewritten as targets complete; every N keeps fsync traffic sane
 /// without making the dashboard's progress stale by more than a few seconds.
 const STATE_FLUSH_EVERY: usize = 16;
+/// Stderr progress cadence: one line every N completions, so a multi-hour
+/// pass shows life without flooding the terminal.
+const PROGRESS_EVERY: usize = 50;
 const WINDOW_SIZE: &str = "1366,768";
 const VIRTUAL_TIME_BUDGET_MS: u64 = 5_000;
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
@@ -835,7 +844,7 @@ pub(crate) struct RunSummary {
     pub(crate) interrupted: bool,
 }
 
-/// The whole capture pass over `targets`, into a fresh `runs/web_<ts>/`.
+/// A whole capture pass over `targets`, into a fresh `runs/web_<ts>/`.
 /// The perimeter lock belongs to the caller.
 pub(crate) fn run_pass(
     out: &Path,
@@ -856,23 +865,8 @@ pub(crate) fn run_pass(
         .into_owned();
     fs::create_dir_all(run_dir.join("shots"))?;
     fs::create_dir_all(run_dir.join("tmp"))?;
-    let mut log = state::open_run_log_as(&run_dir, "run.log")?;
-    state::log_line(
-        &mut log,
-        &format!(
-            "capture pass {run_id}: {} target(s), timeout {timeout_secs}s, {threads} thread(s)",
-            targets.len()
-        ),
-    );
     let chrome = chrome_bin();
-    match &chrome {
-        Some(b) => state::log_line(&mut log, &format!("browser: {b}")),
-        None => state::log_line(
-            &mut log,
-            &format!("browser: none found - headers and titles only (set {CHROME_ENV})"),
-        ),
-    }
-    let mut st = CapState {
+    let st = CapState {
         run: run_id.clone(),
         started_at: now_epoch(),
         timeout_secs,
@@ -891,6 +885,134 @@ pub(crate) fn run_pass(
             })
             .collect(),
     };
+    let todo: Vec<usize> = (0..targets.len()).collect();
+    execute_pass(
+        out,
+        run_id,
+        run_dir,
+        st,
+        todo,
+        targets,
+        timeout_secs,
+        threads,
+        HashMap::new(),
+    )
+}
+
+/// The newest web run with work left, oldest complete runs skipped: a pass
+/// is resumable while some target has no successful capture — undone
+/// (`^C`, crash) or failed (a conn-level miss is retried; resume finishes
+/// the set). Returns the run identity, its state, the todo indices into
+/// `st.targets`, the same work as `CaptureTarget`s, and the screenshot
+/// digest map rebuilt from the manifest so the resumed pass dedupes
+/// against the shots already on disk. `None` = everything captured.
+type ResumablePass = (
+    String,
+    PathBuf,
+    CapState,
+    Vec<usize>,
+    Vec<CaptureTarget>,
+    HashMap<String, String>,
+);
+
+fn find_resumable(out: &Path) -> Result<Option<ResumablePass>> {
+    for run in list_runs(out) {
+        let Some(st) = read_cap_state(out, &run) else {
+            continue; // torn or hand-removed state is not a resume truth
+        };
+        let todo: Vec<usize> = st
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.done || !t.error.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        if todo.is_empty() {
+            continue;
+        }
+        let mut targets = Vec::with_capacity(todo.len());
+        for &i in &todo {
+            let ts = &st.targets[i];
+            let ip = ts.ip.parse::<Ipv4Addr>().with_context(|| {
+                format!("web {run}: target {i} carries a broken ip ({})", ts.ip)
+            })?;
+            let scheme = match ts.scheme.as_str() {
+                "http" => Scheme::Http,
+                "https" => Scheme::Https,
+                other => bail!("web {run}: target {i} carries an unknown scheme ({other:?})"),
+            };
+            targets.push(CaptureTarget {
+                ip,
+                port: ts.port,
+                scheme,
+            });
+        }
+        let run_dir = state::runs_dir(out).join(&run);
+        let mut digests = HashMap::new();
+        for r in read_manifest(out, &run) {
+            if !r.sha256.is_empty() && r.dup_of.is_empty() {
+                digests.insert(r.sha256, r.url);
+            }
+        }
+        return Ok(Some((run, run_dir, st, todo, targets, digests)));
+    }
+    Ok(None)
+}
+
+/// Compact elapsed for the progress lines: 59s, 12m03s, 2h14m.
+fn elapsed_of(started: Instant) -> String {
+    let secs = started.elapsed().as_secs();
+    if secs >= 3600 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// The dispatch-and-collect core, shared by a fresh pass and a resumed
+/// one: `todo` holds the indices into `st.targets` still to (re)shoot,
+/// `targets` the same work as CaptureTargets in the same order, `digests`
+/// the screenshots already on disk. Appends to the run's manifest,
+/// rewrites the state file as targets complete, mirrors progress to
+/// stderr every PROGRESS_EVERY completions. The perimeter lock belongs
+/// to the caller.
+#[allow(clippy::too_many_arguments)]
+fn execute_pass(
+    out: &Path,
+    run_id: String,
+    run_dir: PathBuf,
+    mut st: CapState,
+    todo: Vec<usize>,
+    targets: Vec<CaptureTarget>,
+    timeout_secs: u64,
+    threads: usize,
+    mut digests: HashMap<String, String>,
+) -> Result<RunSummary> {
+    let mut log = state::open_run_log_as(&run_dir, "run.log")?;
+    state::log_line(
+        &mut log,
+        &format!(
+            "capture pass {run_id}: {} of {} target(s), timeout {timeout_secs}s, {threads} thread(s)",
+            todo.len(),
+            st.targets.len()
+        ),
+    );
+    let chrome = chrome_bin();
+    match &chrome {
+        Some(b) => state::log_line(&mut log, &format!("browser: {b}")),
+        None => state::log_line(
+            &mut log,
+            &format!("browser: none found - headers and titles only (set {CHROME_ENV})"),
+        ),
+    }
+    // The budgets may change on a resume (CLI wins); done flips back
+    // while this segment runs. Written before dispatch so the dashboard
+    // never sees a stale "done" pass as running.
+    st.done = false;
+    st.timeout_secs = timeout_secs;
+    st.threads = threads;
     write_cap_state(&run_dir, &st)?;
 
     let targets = Arc::new(targets);
@@ -917,29 +1039,25 @@ pub(crate) fn run_pass(
                         rx.recv()
                     };
                     match job {
-                        Ok(i) => {
+                        Ok(k) => {
                             let outcome =
-                                capture_one(&targets[i], timeout_secs, chrome.as_deref(), &scratch);
-                            if mtx.send((i, outcome)).is_err() {
+                                capture_one(&targets[k], timeout_secs, chrome.as_deref(), &scratch);
+                            if mtx.send((k, outcome)).is_err() {
                                 break;
                             }
                         }
                         // Sender dropped: dispatch is over (clean end or
-                        // abort/cap) — remaining queued jobs stay undone.
+                        // abort) — remaining queued jobs stay undone.
                         Err(_) => break,
                     }
                 }
             });
         }
-        for i in 0..targets.len() {
+        for k in 0..todo.len() {
             if ABORT.load(Ordering::Relaxed) {
                 break;
             }
-            if started.elapsed() >= CAPTURE_TOTAL_CAP {
-                state::log_line(&mut log, "30 min total cap reached - dispatch stopped");
-                break;
-            }
-            if jtx.send(i).is_err() {
+            if jtx.send(k).is_err() {
                 break;
             }
         }
@@ -956,10 +1074,10 @@ pub(crate) fn run_pass(
             .append(true)
             .open(run_dir.join(MANIFEST_FILE))
             .context("opening capture manifest")?;
-        let mut digests: HashMap<String, String> = HashMap::new();
-        let (mut ok, mut failed, mut dups, mut seen) = (0usize, 0usize, 0usize, 0usize);
-        for (i, oc) in mrx {
-            let t = &targets[i];
+        let mut seen = 0usize;
+        for (k, oc) in mrx {
+            let i = todo[k];
+            let t = &targets[k];
             let (shot, sha_hex, dup_of) = match &oc.png {
                 Some(bytes) => {
                     let hex = crate::web::hex(&crate::web::sha256(bytes));
@@ -979,14 +1097,6 @@ pub(crate) fn run_pass(
                 Some(e) => (e.class().to_string(), e.detail()),
                 None => (String::new(), String::new()),
             };
-            if oc.error.is_some() {
-                failed += 1;
-            } else {
-                ok += 1;
-            }
-            if !dup_of.is_empty() {
-                dups += 1;
-            }
             let row = ManifestRow {
                 run: String::new(),
                 url: t.url(),
@@ -1010,18 +1120,53 @@ pub(crate) fn run_pass(
             st.targets[i].done = true;
             st.targets[i].error = row.error.clone();
             seen += 1;
-            if seen % STATE_FLUSH_EVERY == 0 {
+            if seen.is_multiple_of(STATE_FLUSH_EVERY) {
                 write_cap_state(&run_dir, &st)?;
+            }
+            if seen.is_multiple_of(PROGRESS_EVERY) {
+                let failed = st
+                    .targets
+                    .iter()
+                    .filter(|t| t.done && !t.error.is_empty())
+                    .count();
+                state::log_line(
+                    &mut log,
+                    &format!(
+                        "progress: {}/{}, {} failed - {}",
+                        st.done_count(),
+                        st.targets.len(),
+                        failed,
+                        elapsed_of(started)
+                    ),
+                );
+                eprintln!(
+                    "web {run_id}: {}/{}, {} failed - {}",
+                    st.done_count(),
+                    st.targets.len(),
+                    failed,
+                    elapsed_of(started)
+                );
             }
         }
         st.done = true;
         st.interrupted = ABORT.load(Ordering::Relaxed);
         write_cap_state(&run_dir, &st)?;
+        let done = st.done_count();
+        let failed = st
+            .targets
+            .iter()
+            .filter(|t| t.done && !t.error.is_empty())
+            .count();
+        let dups = read_manifest(out, &run_id)
+            .iter()
+            .filter(|r| !r.dup_of.is_empty())
+            .count();
         state::log_line(
             &mut log,
             &format!(
-                "{seen}/{} done: {ok} ok, {failed} failed, {dups} duplicate screenshot(s){}",
-                targets.len(),
+                "{done}/{} done: {} ok, {failed} failed, {dups} duplicate screenshot(s){}",
+                st.targets.len(),
+                done - failed,
                 if st.interrupted { " (interrupted)" } else { "" }
             ),
         );
@@ -1162,22 +1307,51 @@ pub fn run(args: &WebArgs) -> Result<()> {
     }
 
     let _lock = state::lock_perimeter(&args.out)?;
-    let db = Db::open_existing(&args.out)?;
-    let targets = web_targets(&db)?;
-    if targets.is_empty() {
-        bail!(
-            "no http/https service in the registry - run a scan first; \
-             the capture pass is an evidence run, it never discovers anything"
+    let summary = if args.resume {
+        let Some((run_id, run_dir, st, todo, targets, digests)) = find_resumable(&args.out)? else {
+            bail!(
+                "nothing to resume - every web run is complete (or there is none); \
+                 run without --resume for a fresh pass"
+            );
+        };
+        let captured = st
+            .targets
+            .iter()
+            .filter(|t| t.done && t.error.is_empty())
+            .count();
+        eprintln!(
+            "web {run_id}: resuming {} of {} target(s) ({captured} captured) - \
+             timeout {}s, {threads} thread(s) - ^C is safe, resume again to continue",
+            todo.len(),
+            st.targets.len(),
+            args.timeout
         );
-    }
-    if targets.len() > MAX_CAPTURE_TARGETS {
-        bail!(
-            "{} web target(s) - the capture pass caps at {MAX_CAPTURE_TARGETS}; \
-             triage the registry first",
+        execute_pass(
+            &args.out,
+            run_id,
+            run_dir,
+            st,
+            todo,
+            targets,
+            args.timeout,
+            threads,
+            digests,
+        )?
+    } else {
+        let db = Db::open_existing(&args.out)?;
+        let targets = web_targets(&db)?;
+        if targets.is_empty() {
+            bail!(
+                "no http/https service in the registry - run a scan first; \
+                 the capture pass is an evidence run, it never discovers anything"
+            );
+        }
+        eprintln!(
+            "web: {} target(s) in this pass - ^C is safe, --resume continues an interrupted pass",
             targets.len()
         );
-    }
-    let summary = run_pass(&args.out, targets, args.timeout, threads)?;
+        run_pass(&args.out, targets, args.timeout, threads)?
+    };
     eprintln!(
         "web {}: {}/{} target(s) captured, {} failed, {} duplicate screenshot(s){} - evidence in {}",
         summary.run_id,
@@ -1562,6 +1736,87 @@ mod tests {
                 "https://127.0.0.7:39147/",
             ]
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_resumable_picks_the_newest_pass_with_work_left() {
+        let root = std::env::temp_dir().join(format!(
+            "rustrawl-cap-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|t| t.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let perim = root.join("perim");
+        let st_write = |run: &str, st: serde_json::Value, rows: &[serde_json::Value]| {
+            let dir = perim.join("runs").join(run);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(STATE_FILE), serde_json::to_string(&st).unwrap()).unwrap();
+            let mut text = String::new();
+            for r in rows {
+                text.push_str(&serde_json::to_string(r).unwrap());
+                text.push('\n');
+            }
+            fs::write(dir.join(MANIFEST_FILE), text).unwrap();
+        };
+        let target = |ip: &str, done: bool, error: &str| {
+            serde_json::json!({"ip": ip, "port": 80u16, "scheme": "http",
+                               "done": done, "error": error})
+        };
+        // older run: every target captured clean - not a resume truth
+        st_write(
+            "web_2026-01-01_010101",
+            serde_json::json!({"run": "web_2026-01-01_010101", "started_at": 0,
+                "timeout_secs": 7, "threads": 4, "done": true,
+                "targets": [target("127.0.0.1", true, "")]}),
+            &[],
+        );
+        // newest run: one undone, one failed - the resume point
+        st_write(
+            "web_2026-01-02_020202",
+            serde_json::json!({"run": "web_2026-01-02_020202", "started_at": 0,
+                "timeout_secs": 7, "threads": 4, "done": true, "interrupted": true,
+                "targets": [target("127.0.0.1", true, ""),
+                            target("127.0.0.2", false, ""),
+                            target("127.0.0.3", true, "conn-refused")]}),
+            // one clean screenshot already on disk: the digest map must
+            // carry it so the resumed pass dedupes against it
+            &[
+                serde_json::json!({"url": "http://127.0.0.1:80/", "ip": "127.0.0.1",
+                                 "port": 80, "scheme": "http",
+                                 "sha256": "a".repeat(64), "dup_of": ""}),
+            ],
+        );
+
+        let found = find_resumable(&perim).unwrap().expect("a resumable pass");
+        assert_eq!(found.0, "web_2026-01-02_020202");
+        assert_eq!(
+            found.3,
+            vec![1, 2],
+            "undone + failed, done-and-clean stays out"
+        );
+        assert_eq!(
+            found.5.get(&"a".repeat(64)).map(String::as_str),
+            Some("http://127.0.0.1:80/"),
+            "digest map rebuilt from the manifest"
+        );
+        assert_eq!(found.4.len(), 2);
+        assert_eq!(found.4[1].url(), "http://127.0.0.3:80/");
+
+        // everything complete: nothing to resume
+        let clean = root.join("clean-perim");
+        fs::create_dir_all(clean.join("runs").join("web_2026-01-01_010101")).unwrap();
+        st_write(
+            "web_2026-01-01_010101",
+            serde_json::json!({"run": "web_2026-01-01_010101", "started_at": 0,
+                "timeout_secs": 7, "threads": 4, "done": true,
+                "targets": [target("127.0.0.1", true, "")]}),
+            &[],
+        );
+        assert!(find_resumable(&clean).unwrap().is_none());
         let _ = fs::remove_dir_all(&root);
     }
 }

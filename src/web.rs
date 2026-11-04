@@ -1629,11 +1629,12 @@ fn capture_post(out: &Path, body: &[u8]) -> Result<serde_json::Value, Response> 
             "no http/https service for {ip} in the registry - nothing to capture"
         )));
     }
-    if targets.len() > crate::capture::MAX_CAPTURE_TARGETS {
+    if targets.len() > crate::capture::MAX_PER_ASSET_TARGETS {
         return Err(bad(format!(
-            "{} web targets for {ip} - over the {}-target cap, triage the registry first",
+            "{} web targets for {ip} - over the {}-target per-asset cap - \
+             bulk work belongs to the CLI: `rustrawl web` has no cap and resumes",
             targets.len(),
-            crate::capture::MAX_CAPTURE_TARGETS
+            crate::capture::MAX_PER_ASSET_TARGETS
         )));
     }
     // One capture per perimeter: the lock is the cross-process truth (the

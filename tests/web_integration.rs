@@ -1627,7 +1627,190 @@ fn capture_pass_shoots_the_registry_web_services() {
         "the cap select must not claim the export select's xsel marker"
     );
 
+    // ── resume: the newest run with work left wins ─────────────────────
+    // the click's run (2 clean, 1 conn-refused) is resumable; the retried
+    // target lands in that same run directory, the clean rows stay
+    // untouched, and a conn-level retry never spawns chromium
+    let resume_argv = root.join("fake-chrome-resume.argv");
+    let out = bin()
+        .args(["web", "--out", perim.to_str().unwrap(), "--resume"])
+        .env("RUSTRAWL_CHROME_BIN", &fake_chrome)
+        .env("FAKE_CHROME_ARGV", &resume_argv)
+        .output()
+        .expect("web resume launches");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "web {run2}: resuming 1 of 3 target(s) (2 captured)"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("2/3 target(s) captured, 1 failed, 1 duplicate screenshot(s)"),
+        "{stderr}"
+    );
+    let manifest = fs::read_to_string(ui_run_dir.join("targets.jsonl")).unwrap();
+    assert_eq!(
+        manifest.lines().count(),
+        4,
+        "3 click rows + 1 retry: {manifest}"
+    );
+    let ui_shots: Vec<String> = fs::read_dir(ui_run_dir.join("shots"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        ui_shots.len(),
+        1,
+        "a retry adds no screenshot: {ui_shots:?}"
+    );
+    assert!(
+        !resume_argv.exists(),
+        "a conn-level retry never spawns chromium, so no argv dump"
+    );
+    let st: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(ui_run_dir.join("cap_state.json")).unwrap())
+            .unwrap();
+    assert_eq!(st["done"], true, "{st}");
+    assert_eq!(st["interrupted"], false, "{st}");
+    assert!(
+        st["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["done"] == true),
+        "the retried row is done again: {st}"
+    );
+    assert_eq!(
+        st["threads"], 4,
+        "the resume's own CLI budget wins over the click's: {st}"
+    );
+    let web_runs: Vec<String> = fs::read_dir(perim.join("runs"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("web_"))
+        .collect();
+    assert_eq!(
+        web_runs.len(),
+        2,
+        "a resume never opens a second run: {web_runs:?}"
+    );
+
     drop(child);
+    fs::remove_dir_all(&root).ok();
+}
+
+/// No cap on the CLI pass: 530 classified web services (one host, a wall
+/// of closed 47xxx ports) shoot end to end - the old 512 refusal is gone,
+/// progress lines ride stderr every 50 completions, the dashboard's
+/// per-asset click stays bounded (400 over the per-asset cap), and a
+/// resume re-shoots the all-failed set into the same single run dir.
+#[test]
+fn capture_pass_has_no_target_cap_and_per_asset_stays_bounded() {
+    let root = temp_root("capnocap");
+    let scope_path = root.join("scope.yaml");
+    fs::write(&scope_path, SCOPE).unwrap();
+    let perim = root.join("perim");
+
+    // discovery seeds the registry: the /29 up, connect mode
+    let out = bin()
+        .args([
+            "run",
+            scope_path.to_str().unwrap(),
+            "--out",
+            perim.to_str().unwrap(),
+            "--mode",
+            "connect",
+        ])
+        .output()
+        .expect("run launches");
+    assert!(
+        out.status.success(),
+        "run failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // the dashboard with the parameterized fake nmap: 530 closed ports
+    // as http on every host it reports (no tls port, no browser needed:
+    // conn-level refusals never spawn chromium)
+    let fake_nmap = root.join("fake-cap-nmap");
+    fs::write(&fake_nmap, FAKE_CAP_NMAP).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_nmap, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let ports: Vec<String> = (47000u16..47530).map(|p| p.to_string()).collect();
+    let (child, dport, _stderr_reader) = spawn_dashboard(
+        &perim,
+        "capnocap",
+        &[
+            ("RUSTRAWL_NMAP_BIN", fake_nmap.to_str().unwrap()),
+            ("FAKE_CAP_PORTS", &ports.join(" ")),
+        ],
+    );
+
+    // one manual rescan: 530 http services on 127.0.0.2, none probed by us
+    let (status, body) = post(
+        dport,
+        "/api/scan",
+        r#"{"ips":["127.0.0.2"],"args":""}"#,
+        true,
+    );
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["open"], 530, "{body}");
+
+    // the per-asset click refuses past its cap; bulk work belongs to the CLI
+    let (status, body) = post(dport, "/api/capture", r#"{"ip":"127.0.0.2"}"#, true);
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("per-asset cap"), "{body}");
+    drop(child);
+
+    let out = bin()
+        .args(["web", "--out", perim.to_str().unwrap(), "--threads", "8"])
+        .output()
+        .expect("web launches");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a 530-target pass must run, not refuse: {stderr}"
+    );
+    assert!(
+        stderr.contains("web: 530 target(s) in this pass"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("50/530, "),
+        "progress rides stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("0/530 target(s) captured, 530 failed"),
+        "{stderr}"
+    );
+
+    // resume: every target failed conn-level, so the pass re-shoots all
+    // 530 into the same run - still no cap, still exactly one run dir
+    let out = bin()
+        .args(["web", "--out", perim.to_str().unwrap(), "--resume"])
+        .output()
+        .expect("web resume launches");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("resuming 530 of 530 target(s) (0 captured)"),
+        "failed targets are retried: {stderr}"
+    );
+    let runs: Vec<String> = fs::read_dir(perim.join("runs"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("web_"))
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
     fs::remove_dir_all(&root).ok();
 }
 

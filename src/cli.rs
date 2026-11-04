@@ -180,6 +180,12 @@ pub struct WebArgs {
     /// Parallel captures
     #[arg(long)]
     pub threads: Option<usize>,
+    /// Continue the newest web run that has work left: everything it has
+    /// not captured yet - failed targets included - is (re)shot into that
+    /// same run directory, digest map and manifest rebuilt from what is
+    /// already there. Without it, a fresh pass re-shoots every target
+    #[arg(long)]
+    pub resume: bool,
 }
 
 #[derive(Subcommand)]
