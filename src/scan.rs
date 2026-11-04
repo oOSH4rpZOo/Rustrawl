@@ -623,17 +623,14 @@ fn ingest_chunk(
 
 // ----------------------------------------------------------- manual rescan
 
-/// Wall-clock cap on one dashboard-triggered rescan. A single host is
-/// minutes of work even with scripts and version detection; past this the
-/// nmap process is killed and the operator gets the capture path.
-const MANUAL_SCAN_CAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-
-/// The same brake for a multi-host batch (applied per batch: a split job
-/// gets the full budget on every nmap invocation). A killed run ingests
-/// nothing, so an undersized cap would throw away whole legitimate
-/// batches — a /24 with `-sC -sV -p-` legitimately outlives the
-/// single-host cap; the stop button stays the escape hatch.
-const MANUAL_SCAN_CAP_MULTI: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// Wall-clock cap on one dashboard-triggered rescan batch, single host
+/// included (the sheet's one-host rescan defaults to a full scan,
+/// `-sV -O -p- -Pn`, which a filtering host legitimately outlives; the
+/// same budget already covered a /24 with `-sC -sV -p-`). Past this the
+/// nmap process is killed and the operator gets the capture path; the
+/// stop button stays the escape hatch. A killed run ingests nothing, so
+/// an undersized cap would throw away whole legitimate scans.
+const MANUAL_SCAN_CAP: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// One manual rescan batch's host count: a resolved set past this splits
 /// into sequential nmap invocations inside the one run directory (see
@@ -797,7 +794,7 @@ pub(crate) fn manual_scan(
     // stop that landed after this job started - every check below can
     // bail honestly.
     let stopped = || ABORT.load(Ordering::Relaxed) || SCAN_GEN.load(Ordering::Relaxed) != gen;
-    for (i, batch) in batches.iter().enumerate() {
+    for i in 0..batches.len() {
         // A stop landing in the previous batch's ingest must not spawn
         // another nmap; one landing after the last ingest still ends the
         // job interrupted, not 200-OK.
@@ -818,11 +815,7 @@ pub(crate) fn manual_scan(
             &mut log,
         )?;
         let started = std::time::Instant::now();
-        let cap = if batch.len() > 1 {
-            MANUAL_SCAN_CAP_MULTI
-        } else {
-            MANUAL_SCAN_CAP
-        };
+        let cap = MANUAL_SCAN_CAP;
         let status = loop {
             match child.try_wait()? {
                 Some(s) => break s,

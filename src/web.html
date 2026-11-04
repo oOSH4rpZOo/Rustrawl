@@ -582,6 +582,24 @@ function savePorts(view) {
 }
 let selPorts = { services: loadPorts(PORT_KEYS.services), hosts: loadPorts(PORT_KEYS.hosts) };
 
+// The host sheet's one-host rescan args: an editable line beside the
+// "rescan this host now" button, remembered per browser like the port
+// picks. The server validates the string; an empty line means "the usual
+// args" (its own defaults), so the worst a typo can do is a 400 whose
+// reason lands in the button's title.
+const SHEET_ARGS_KEY = "rustrawl-sheet-args";
+const SHEET_ARGS_DEFAULT = "-sV -O -p- -Pn";
+function loadSheetArgs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(SHEET_ARGS_KEY));
+    return typeof v === "string" ? v : SHEET_ARGS_DEFAULT;
+  } catch { return SHEET_ARGS_DEFAULT; }
+}
+function saveSheetArgs(v) {
+  try { localStorage.setItem(SHEET_ARGS_KEY, JSON.stringify(v)); } catch {}
+}
+let sheetArgs = loadSheetArgs();
+
 // The triage vocabulary: one mark per host, todo (orange) / clean (green)
 // / vuln (red), cycled none → todo → vuln → clean → none. Marks live on
 // the host level only.
@@ -2013,24 +2031,32 @@ async function renderHost(ip) {
     ], h.names, null, "sheet-names");
 
     // Rescan: the queue button drops this host on the rescan tab (the
-    // args, the run, the stop and the live output all live there), and the
-    // second button fires a one-host rescan right here - synchronous like
-    // the capture button below, the sheet re-renders with the fresh rows.
+    // run, the stop and the live output all live there), and the editable
+    // line + second button fire a one-host rescan right here - a full
+    // scan by default (-sV -O -p- -Pn), remembered per browser like the
+    // port picks, synchronous like the capture button below, the sheet
+    // re-renders with the fresh rows.
     $view.appendChild(el("h2", "rescan"));
     const scanrow = el("div", null, "scanrow");
     const rs = el("button", "queue this host for a rescan", "save");
     rs.title = "adds this host to the rescan queue";
     rs.onclick = () => { queueHosts([ip]); flashQueued(rs, "queued"); };
     scanrow.appendChild(rs);
+    const rsArgs = el("input");
+    rsArgs.className = "args";
+    rsArgs.value = sheetArgs;
+    rsArgs.placeholder = "nmap args for the one-host rescan - empty means the usual args";
+    rsArgs.oninput = () => { sheetArgs = rsArgs.value; saveSheetArgs(sheetArgs); };
+    scanrow.appendChild(rsArgs);
     const rsNow = el("button", "rescan this host now", "save");
-    rsNow.title = "runs nmap on this host right away, with the usual args";
+    rsNow.title = "runs nmap on this host right away with these args (-O needs root)";
     rsNow.onclick = async () => {
       if (rsNow.disabled) return;
       rsNow.disabled = true;
       const orig = rsNow.textContent;
       rsNow.textContent = "scanning...";
       try {
-        const res = await postScanBatch({ ip });
+        const res = await postScanBatch({ ip, args: rsArgs.value });
         flashQueued(rsNow, "rescanned, " + res.open + " open");
         // the fresh services and evidence, once the flash has been seen -
         // unless the operator moved on (any navigation bumps the token)

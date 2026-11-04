@@ -143,7 +143,9 @@ rustrawl db --out data/acme --web        # http://127.0.0.1:8391
 /24 buckets, sortable and filterable tables, host sheets with the nmap
 evidence per run, triage (todo / vuln / clean), pwned mark, tags, markdown
 notes with pasted screenshots, a rescan tab with live nmap output, and a
-capture tab over the screenshot runs. Writes are limited to triage, marks,
+capture tab over the screenshot runs. The host sheet rescans one host
+right away with an editable nmap command, a full scan by default
+(`-sV -O -p- -Pn`, remembered per browser). Writes are limited to triage, marks,
 asset types, notes and rescans, and every write requires an
 `X-Rustrawl: 1` header that a cross-origin page cannot set. Binds
 127.0.0.1 unless `--bind` says otherwise.

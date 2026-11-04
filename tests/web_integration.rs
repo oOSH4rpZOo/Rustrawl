@@ -853,6 +853,20 @@ fn web_dashboard_serves_the_registry_over_http() {
     );
     assert_eq!(v["services"][0]["port"], 39147);
     assert_eq!(v["services"][0]["service"], "rescan-svc");
+    // the args rode along: the single-host run's argv carries what the
+    // sheet's editable line sends (the {ip, args} shape)
+    let argv = fs::read_to_string(
+        perim
+            .join("runs")
+            .join(v["run"].as_str().unwrap())
+            .join("scans")
+            .join("chunk-0000.argv"),
+    )
+    .expect("argv dump");
+    assert!(
+        argv.lines().any(|l| l == "39147"),
+        "the sheet args reached nmap: {argv:?}"
+    );
 
     // the sheet now carries the fresh rows: the services table row and the
     // evidence stack led by the manual run (it beats the older fabricated
@@ -1607,6 +1621,10 @@ fn capture_pass_shoots_the_registry_web_services() {
         "rescan this host now",
         "scanning...",
         "rescanned, ",
+        // the sheet's one-host rescan: a full scan by default, the
+        // command editable and remembered per browser
+        "-sV -O -p- -Pn",
+        "rustrawl-sheet-args",
         "rustrawl-show-services",
         "rustrawl-show-hosts",
         " - showing ",
