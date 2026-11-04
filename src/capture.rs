@@ -371,18 +371,15 @@ struct ChildResult {
     spawn_error: Option<String>,
 }
 
-/// Spawns `bin argv`, waits up to `deadline`, then kills. stderr drains on
-/// its own thread — a chatty page must not fill the pipe and stall the child
-/// past its deadline.
-fn run_child(bin: &str, argv: &[String], deadline: Duration) -> ChildResult {
-    let child = Command::new(bin)
-        .args(argv)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
+/// Spawns `bin argv`, waits up to `deadline`, then kills. stderr lands in a
+/// scratch file instead of a pipe: chromium forks helpers that inherit the
+/// fd and can outlive the kill, and a pipe reader waits for ALL of them to
+/// close it - one stuck renderer would stall this worker forever. A file
+/// never blocks, and orphans writing into it after the read are harmless.
+fn run_child(bin: &str, argv: &[String], deadline: Duration, scratch: &Path) -> ChildResult {
+    let errpath = scratch.join("stderr.log");
+    let errfile = match std::fs::File::create(&errpath) {
+        Ok(f) => f,
         Err(e) => {
             return ChildResult {
                 code: None,
@@ -392,14 +389,24 @@ fn run_child(bin: &str, argv: &[String], deadline: Duration) -> ChildResult {
             }
         }
     };
-    let mut errpipe = child.stderr.take();
-    let drainer = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(p) = errpipe.as_mut() {
-            let _ = p.read_to_string(&mut buf);
+    let child = Command::new(bin)
+        .args(argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(errfile))
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = fs::remove_file(&errpath);
+            return ChildResult {
+                code: None,
+                killed: false,
+                stderr: String::new(),
+                spawn_error: Some(format!("{bin}: {e}")),
+            };
         }
-        buf
-    });
+    };
     let end = Instant::now() + deadline;
     let code = loop {
         match child.try_wait() {
@@ -413,10 +420,12 @@ fn run_child(bin: &str, argv: &[String], deadline: Duration) -> ChildResult {
             Err(_) => break None,
         }
     };
+    let stderr = fs::read_to_string(&errpath).unwrap_or_default();
+    let _ = fs::remove_file(&errpath);
     ChildResult {
         code,
         killed: code.is_none(),
-        stderr: drainer.join().unwrap_or_default(),
+        stderr,
         spawn_error: None,
     }
 }
@@ -662,6 +671,7 @@ pub(crate) fn capture_one(
                 &curl_bin(),
                 &curl_argv(timeout_secs, &hdr, &bodyf, &t.url()),
                 timeout + KILL_SLACK,
+                scratch,
             );
             if let Some(se) = res.spawn_error {
                 error = Some(ShotError::BadStatus(format!("{se} (set {CURL_ENV})")));
@@ -697,6 +707,7 @@ pub(crate) fn capture_one(
                 bin,
                 &chrome_argv(timeout.as_millis() as u64, &shot, &profile, &t.url()),
                 timeout + KILL_SLACK,
+                scratch,
             );
             let shot_bytes = fs::read(&shot).ok().unwrap_or_default();
             if shot_bytes.starts_with(PNG_MAGIC) {
@@ -1053,18 +1064,43 @@ fn execute_pass(
                 }
             });
         }
-        for k in 0..todo.len() {
-            if ABORT.load(Ordering::Relaxed) {
-                break;
+        // The dispatcher runs on its own thread so the main loop receives
+        // live: outcomes land in the manifest as they come, screenshots hit
+        // disk right away and progress prints from the first 50
+        // completions. Dispatching inline instead paces itself at worker
+        // speed over the whole todo - on a four-digit pass that meant hours
+        // of silence with every outcome (PNG bytes included) buffered in
+        // memory behind the still-running dispatch.
+        // The dispatcher polls rather than blocks on send: an abort with a
+        // full buffer must not strand this thread mid-send past the scope
+        // join (the workers are gone then, and nothing drains the queue).
+        let total_jobs = todo.len();
+        s.spawn(move || {
+            for k in 0..total_jobs {
+                if ABORT.load(Ordering::Relaxed) {
+                    return;
+                }
+                loop {
+                    match jtx.try_send(k) {
+                        Ok(()) => break,
+                        // The re-check lives HERE, in the wait itself: on
+                        // abort the workers break at their loop top without
+                        // recv-ing again, the queue never drains, and a
+                        // dispatcher that only polled between jobs would
+                        // spin on Full past the scope join.
+                        Err(mpsc::TrySendError::Full(_)) => {
+                            if ABORT.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(mpsc::TrySendError::Disconnected(_)) => return,
+                    }
+                }
             }
-            if jtx.send(k).is_err() {
-                break;
-            }
-        }
-        drop(jtx);
-        // The dispatcher's own sender must die before the receive loop:
-        // the workers only hold clones, and with the original alive the
-        // outcome channel never closes and this loop hangs forever.
+            // jtx drops when this thread body ends: dispatch is over (clean
+            // end or abort) - remaining queued jobs stay undone.
+        });
         drop(mtx);
 
         // The main thread owns all writing: one manifest appender, one state
