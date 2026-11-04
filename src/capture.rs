@@ -24,6 +24,12 @@
 //! cards); missing chromium AND curl refuses the run. Overrides:
 //! `RUSTRAWL_CHROME_BIN`, `RUSTRAWL_CURL_BIN`.
 //!
+//! `--titles` makes the plain-client answer the whole point (the
+//! `auxiliary/scanner/http/title` shape): status, headers, title and the
+//! fingerprint, no browser step at all - no screenshots, no dedup, no
+//! `browser-missing` cards. A run remembers its kind in its state and
+//! only resumes with the same kind.
+//!
 //! Targets: every registry service on a host that is currently up, where
 //! name/port classifies as http or https (same predicate as the dashboard's
 //! own links — a dead host is never probed, mirroring the names pass).
@@ -642,12 +648,15 @@ pub(crate) struct Outcome {
 }
 
 /// One target: headers + title first (a plain client, not the browser), then
-/// the screenshot. A connection-level header failure short-circuits the
-/// browser — it would learn the same thing, slower.
+/// the screenshot — skipped entirely in titles mode, where the plain client's
+/// answer IS the deliverable (a missing browser is not an error there). A
+/// connection-level header failure short-circuits the browser — it would
+/// learn the same thing, slower.
 pub(crate) fn capture_one(
     t: &CaptureTarget,
     timeout_secs: u64,
     chrome: Option<&str>,
+    titles: bool,
     scratch: &Path,
 ) -> Outcome {
     let started = Instant::now();
@@ -700,7 +709,7 @@ pub(crate) fn capture_one(
         .to_string();
 
     let mut png: Option<Vec<u8>> = None;
-    if error.as_ref().is_none_or(|e| !e.conn_level()) {
+    if !titles && error.as_ref().is_none_or(|e| !e.conn_level()) {
         if let Some(bin) = chrome {
             let shot = scratch.join("shot.png");
             let profile = scratch.join("profile");
@@ -777,6 +786,13 @@ pub(crate) struct CapState {
     /// shadow a bulk pass with hours of work left.
     #[serde(default)]
     pub(crate) origin: String,
+    /// The pass kind: true = HTTP-only title check (no browser, no
+    /// screenshots), false = full screenshots. `--resume` only continues a
+    /// run of its own kind - the flag the user passes picks the run, and
+    /// mixing kinds inside one manifest would pair rows that mean different
+    /// things.
+    #[serde(default)]
+    pub(crate) titles: bool,
     pub(crate) targets: Vec<CapTargetState>,
 }
 
@@ -861,9 +877,12 @@ pub(crate) struct RunSummary {
     pub(crate) failed: usize,
     pub(crate) dups: usize,
     pub(crate) interrupted: bool,
+    /// HTTP-only title-check pass (no screenshots, no dedup).
+    pub(crate) titles: bool,
 }
 
 /// A whole capture pass over `targets`, into a fresh `runs/web_<ts>/`.
+/// `titles` picks the pass kind: HTTP-only title check or full screenshots.
 /// The perimeter lock belongs to the caller.
 pub(crate) fn run_pass(
     out: &Path,
@@ -871,6 +890,7 @@ pub(crate) fn run_pass(
     timeout_secs: u64,
     threads: usize,
     origin: &str,
+    titles: bool,
 ) -> Result<RunSummary> {
     let run_id = state::stamped_id("web");
     let run_dir = state::create_run(out, &run_id)?;
@@ -885,7 +905,7 @@ pub(crate) fn run_pass(
         .into_owned();
     fs::create_dir_all(run_dir.join("shots"))?;
     fs::create_dir_all(run_dir.join("tmp"))?;
-    let chrome = chrome_bin();
+    let chrome = if titles { None } else { chrome_bin() };
     let st = CapState {
         run: run_id.clone(),
         started_at: now_epoch(),
@@ -895,6 +915,7 @@ pub(crate) fn run_pass(
         interrupted: false,
         chrome: chrome.clone().unwrap_or_default(),
         origin: origin.to_string(),
+        titles,
         targets: targets
             .iter()
             .map(|t| CapTargetState {
@@ -916,20 +937,22 @@ pub(crate) fn run_pass(
         targets,
         timeout_secs,
         threads,
+        titles,
         HashMap::new(),
     )
 }
 
-/// The newest web PASS with work left, oldest complete runs skipped
-/// (dashboard click runs are never resumed - they are re-runnable from
-/// their button, and their one dead target must not shadow a bulk pass):
-/// a pass is resumable while some target has no successful capture -
-/// undone (`^C`, crash) or failed (a conn-level miss is retried; resume
-/// finishes the set). Returns the run identity, its state, the todo
-/// indices into `st.targets`, the same work as `CaptureTarget`s, and the
-/// screenshot digest map rebuilt from the manifest so the resumed pass
-/// dedupes against the shots already on disk. `None` = everything
-/// captured.
+/// The newest web PASS with work left that matches the requested kind
+/// (`titles`: HTTP-only runs, otherwise screenshot runs), oldest complete
+/// and mismatched runs skipped (dashboard click runs are never resumed -
+/// they are re-runnable from their button, and their one dead target must
+/// not shadow a bulk pass): a pass is resumable while some target has no
+/// successful capture - undone (`^C`, crash) or failed (a conn-level miss
+/// is retried; resume finishes the set). Returns the run identity, its
+/// state, the todo indices into `st.targets`, the same work as
+/// `CaptureTarget`s, and the screenshot digest map rebuilt from the
+/// manifest so the resumed pass dedupes against the shots already on disk.
+/// `None` = everything captured.
 type ResumablePass = (
     String,
     PathBuf,
@@ -939,12 +962,12 @@ type ResumablePass = (
     HashMap<String, String>,
 );
 
-fn find_resumable(out: &Path) -> Result<Option<ResumablePass>> {
+fn find_resumable(out: &Path, titles: bool) -> Result<Option<ResumablePass>> {
     for run in list_runs(out) {
         let Some(st) = read_cap_state(out, &run) else {
             continue; // torn or hand-removed state is not a resume truth
         };
-        if st.origin == "click" {
+        if st.origin == "click" || st.titles != titles {
             continue;
         }
         let todo: Vec<usize> = st
@@ -1028,6 +1051,7 @@ fn execute_pass(
     targets: Vec<CaptureTarget>,
     timeout_secs: u64,
     threads: usize,
+    titles: bool,
     mut digests: HashMap<String, String>,
 ) -> Result<RunSummary> {
     let mut log = state::open_run_log_as(&run_dir, "run.log")?;
@@ -1039,13 +1063,20 @@ fn execute_pass(
             st.targets.len()
         ),
     );
-    let chrome = chrome_bin();
-    match &chrome {
-        Some(b) => state::log_line(&mut log, &format!("browser: {b}")),
-        None => state::log_line(
+    let chrome = if titles { None } else { chrome_bin() };
+    if titles {
+        state::log_line(
             &mut log,
-            &format!("browser: none found - headers and titles only (set {CHROME_ENV})"),
-        ),
+            "mode: titles - HTTP-only, no browser, no screenshots",
+        );
+    } else {
+        match &chrome {
+            Some(b) => state::log_line(&mut log, &format!("browser: {b}")),
+            None => state::log_line(
+                &mut log,
+                &format!("browser: none found - headers and titles only (set {CHROME_ENV})"),
+            ),
+        }
     }
     // The budgets may change on a resume (CLI wins); done flips back
     // while this segment runs. Written before dispatch so the dashboard
@@ -1054,6 +1085,7 @@ fn execute_pass(
     st.interrupted = false;
     st.timeout_secs = timeout_secs;
     st.threads = threads;
+    st.titles = titles;
     // The resumed segment's own truth: a pass started before chromium was
     // installed must not keep claiming headers-only once its retry takes
     // screenshots (and the other way around).
@@ -1085,8 +1117,13 @@ fn execute_pass(
                     };
                     match job {
                         Ok(k) => {
-                            let outcome =
-                                capture_one(&targets[k], timeout_secs, chrome.as_deref(), &scratch);
+                            let outcome = capture_one(
+                                &targets[k],
+                                timeout_secs,
+                                chrome.as_deref(),
+                                titles,
+                                &scratch,
+                            );
                             if mtx.send((k, outcome)).is_err() {
                                 break;
                             }
@@ -1268,6 +1305,7 @@ fn execute_pass(
         failed,
         dups,
         interrupted: st.interrupted,
+        titles,
     })
 }
 
@@ -1378,11 +1416,13 @@ pub fn run(args: &WebArgs) -> Result<()> {
 
     let _lock = state::lock_perimeter(&args.out)?;
     let summary = if args.resume {
-        let Some((run_id, run_dir, st, todo, targets, digests)) = find_resumable(&args.out)? else {
+        let Some((run_id, run_dir, st, todo, targets, digests)) =
+            find_resumable(&args.out, args.titles)?
+        else {
             bail!(
-                "nothing to resume - every web pass is complete (or there is none; \
-                 dashboard click runs are never resumed); \
-                 run without --resume for a fresh pass"
+                "nothing to resume - every matching web pass is complete (or there \
+                 is none; dashboard click runs are never resumed, and a titles pass \
+                 only resumes with --titles); run without --resume for a fresh pass"
             );
         };
         let captured = st
@@ -1406,6 +1446,7 @@ pub fn run(args: &WebArgs) -> Result<()> {
             targets,
             args.timeout,
             threads,
+            args.titles,
             digests,
         )?
     } else {
@@ -1418,19 +1459,42 @@ pub fn run(args: &WebArgs) -> Result<()> {
             );
         }
         eprintln!(
-            "web: {} target(s) in this pass - ^C is safe, --resume continues an interrupted pass",
-            targets.len()
+            "web: {} target(s) in this pass{} - ^C is safe, --resume continues an interrupted pass",
+            targets.len(),
+            if args.titles {
+                " (titles, no screenshots)"
+            } else {
+                ""
+            }
         );
-        run_pass(&args.out, targets, args.timeout, threads, "pass")?
+        run_pass(
+            &args.out,
+            targets,
+            args.timeout,
+            threads,
+            "pass",
+            args.titles,
+        )?
+    };
+    // A titles pass never dedupes (no screenshots), so the dup count would
+    // read as a stub: the tail says what the run is instead.
+    let tail = if summary.titles {
+        " (titles only)".to_string()
+    } else {
+        format!(", {} duplicate screenshot(s)", summary.dups)
     };
     eprintln!(
-        "web {}: {}/{} target(s) captured, {} failed, {} duplicate screenshot(s){} - evidence in {}",
+        "web {}: {}/{} target(s) captured, {} failed{}{} - evidence in {}",
         summary.run_id,
         summary.ok,
         summary.total,
         summary.failed,
-        summary.dups,
-        if summary.interrupted { " (interrupted)" } else { "" },
+        tail,
+        if summary.interrupted {
+            " (interrupted)"
+        } else {
+            ""
+        },
         summary.run_dir.display()
     );
     Ok(())
@@ -1889,7 +1953,9 @@ mod tests {
             &[],
         );
 
-        let found = find_resumable(&perim).unwrap().expect("a resumable pass");
+        let found = find_resumable(&perim, false)
+            .unwrap()
+            .expect("a resumable pass");
         assert_eq!(
             found.0, "web_2026-01-02_020202",
             "the click run (newest, work left) is skipped; the pass wins"
@@ -1917,7 +1983,85 @@ mod tests {
                 "targets": [target("127.0.0.1", true, "")]}),
             &[],
         );
-        assert!(find_resumable(&clean).unwrap().is_none());
+        assert!(find_resumable(&clean, false).unwrap().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The requested kind picks the run: a titles pass only resumes with
+    /// `--titles`, a screenshots pass without it - and a state file from
+    /// before the kinds existed (no `titles` field) counts as screenshots.
+    #[test]
+    fn find_resumable_matches_the_pass_kind() {
+        let root = std::env::temp_dir().join(format!(
+            "rustrawl-cap-kind-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|t| t.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let perim = root.join("perim");
+        let runs = perim.join("runs");
+        fs::create_dir_all(runs.join("web_2026-02-01_010101")).unwrap();
+        fs::create_dir_all(runs.join("web_2026-02-02_020202")).unwrap();
+        let target = |ip: &str, done: bool, err: &str| {
+            serde_json::json!({"ip": ip, "port": 80, "scheme": "http",
+                             "done": done, "error": err})
+        };
+        let st_write = |run: &str, v: serde_json::Value| {
+            fs::write(
+                runs.join(run).join("cap_state.json"),
+                serde_json::to_string_pretty(&v).unwrap(),
+            )
+            .unwrap();
+        };
+        // newest: a titles pass with work left
+        st_write(
+            "web_2026-02-02_020202",
+            serde_json::json!({"run": "web_2026-02-02_020202", "started_at": 0,
+                "timeout_secs": 7, "threads": 4, "done": true, "titles": true,
+                "targets": [target("127.0.0.1", false, "")]}),
+        );
+        // older: a screenshots pass with work left
+        st_write(
+            "web_2026-02-01_010101",
+            serde_json::json!({"run": "web_2026-02-01_010101", "started_at": 0,
+                "timeout_secs": 7, "threads": 4, "done": true,
+                "targets": [target("127.0.0.2", false, "")]}),
+        );
+
+        let titles = find_resumable(&perim, true)
+            .unwrap()
+            .expect("a titles pass to resume");
+        assert_eq!(titles.0, "web_2026-02-02_020202");
+        let shots = find_resumable(&perim, false)
+            .unwrap()
+            .expect("a screenshots pass to resume");
+        assert_eq!(shots.0, "web_2026-02-01_010101");
+
+        // a pre-kinds state file carries no titles field: screenshots
+        let legacy_dir = root.join("legacy");
+        fs::create_dir_all(legacy_dir.join("runs").join("web_2026-02-03_030303")).unwrap();
+        fs::write(
+            legacy_dir
+                .join("runs")
+                .join("web_2026-02-03_030303")
+                .join("cap_state.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "run": "web_2026-02-03_030303", "started_at": 0,
+                "timeout_secs": 7, "threads": 4, "done": true,
+                "targets": [target("127.0.0.3", false, "")]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let legacy = find_resumable(&legacy_dir, false)
+            .unwrap()
+            .expect("a legacy state counts as screenshots");
+        assert_eq!(legacy.0, "web_2026-02-03_030303");
+        assert!(
+            find_resumable(&legacy_dir, true).unwrap().is_none(),
+            "no titles run exists there"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

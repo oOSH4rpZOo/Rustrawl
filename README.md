@@ -57,7 +57,7 @@ Everything discovered stays inside `includes` minus `excludes`, always.
 rustrawl run  scope.yaml --out data/acme [--mode auto|syn|connect] [--resume] [--force] [--dry-run]
 rustrawl scan scope.yaml --out data/acme [--nmap-args "..."] [--profile "range=args"] [--threads 4]
 rustrawl names --out data/acme [--dns ip:port] [--zone domain] [--domain domain] [--sources dns,tls,ldap]
-rustrawl web  --out data/acme [--timeout 7] [--threads 4] [--resume]
+rustrawl web  --out data/acme [--timeout 7] [--threads 4] [--titles] [--resume]
 rustrawl db   --out data/acme              # interactive console
 rustrawl db   --out data/acme stats        # counts + run outcomes
 rustrawl db   --out data/acme export       # the registry as nmap XML on stdout
@@ -121,6 +121,13 @@ completions. `--threads` goes up to 32; the dashboard's per-asset
 capture stays bounded at 512 targets per host, and its click runs are
 never resumed (re-run from the button) so one dead port cannot shadow
 a bulk pass.
+
+`--titles` runs an HTTP-only pass instead, in the
+`auxiliary/scanner/http/title` shape: status, headers, page title and
+the signature table straight from the plain client - no browser, no
+screenshots, no dedup, no `browser-missing` cards. The run remembers
+its kind and `--resume` only continues a run of the same kind (a
+titles pass with `--titles`, a screenshots pass without it).
 
 ## Read the results
 

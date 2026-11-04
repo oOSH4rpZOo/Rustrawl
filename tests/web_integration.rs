@@ -1625,6 +1625,11 @@ fn capture_pass_shoots_the_registry_web_services() {
         // command editable and remembered per browser
         "-sV -O -p- -Pn",
         "rustrawl-sheet-args",
+        // titles runs announce themselves, and a clean titles tile is a
+        // quiet placeholder, never the red error box
+        "· titles",
+        "titles only, no screenshots",
+        "capquiet",
         "rustrawl-show-services",
         "rustrawl-show-hosts",
         " - showing ",
@@ -2213,6 +2218,203 @@ fn big_rescan_splits_into_sequential_batches() {
             .is_some_and(|t| t.contains("fake nmap on")),
         "{body}"
     );
+
+    drop(child);
+    fs::remove_dir_all(&root).ok();
+}
+
+/// The title check (auxiliary/scanner/http/title shape): an HTTP-only pass
+/// records status, headers, title and fingerprint from the plain client and
+/// never spawns the browser - the chromium stand-in's argv dump stays
+/// absent, the shots dir stays empty. The run remembers its kind: a plain
+/// `--resume` refuses it (nothing of that kind to resume) while
+/// `--titles --resume` retries the failed set, still browserless, into the
+/// same run dir.
+#[test]
+fn titles_pass_checks_http_without_a_browser() {
+    let root = temp_root("captitles");
+    let scope_path = root.join("scope.yaml");
+    fs::write(&scope_path, SCOPE).unwrap();
+    let perim = root.join("perim");
+
+    // discovery seeds the registry: the /29 up, connect mode
+    let out = bin()
+        .args([
+            "run",
+            scope_path.to_str().unwrap(),
+            "--out",
+            perim.to_str().unwrap(),
+            "--mode",
+            "connect",
+        ])
+        .output()
+        .expect("run launches");
+    assert!(
+        out.status.success(),
+        "run failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // six classified http services on 127.0.0.2, none probed by us
+    let fake_nmap = root.join("fake-titles-nmap");
+    fs::write(&fake_nmap, FAKE_CAP_NMAP).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_nmap, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let ports: Vec<String> = (47600u16..47606).map(|p| p.to_string()).collect();
+    let (child, dport, _stderr_reader) = spawn_dashboard(
+        &perim,
+        "captitles",
+        &[
+            ("RUSTRAWL_NMAP_BIN", fake_nmap.to_str().unwrap()),
+            ("FAKE_CAP_PORTS", &ports.join(" ")),
+        ],
+    );
+    let (status, body) = post(
+        dport,
+        "/api/scan",
+        r#"{"ips":["127.0.0.2"],"args":""}"#,
+        true,
+    );
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["open"], 6, "{body}");
+
+    // one live listener among the closed five; the fake chromium rides
+    // along so a stray browser spawn would be LOUD (its argv dump appears)
+    serve_cap_page(47600);
+    let fake_chrome = root.join("fake-chrome");
+    fs::write(&fake_chrome, FAKE_CHROME).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_chrome, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let argv_dump = root.join("fake-chrome-titles.argv");
+    let out = bin()
+        .args(["web", "--out", perim.to_str().unwrap(), "--titles"])
+        .env("RUSTRAWL_CHROME_BIN", &fake_chrome)
+        .env("FAKE_CHROME_ARGV", &argv_dump)
+        .output()
+        .expect("web launches");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "a titles pass must run: {stderr}");
+    assert!(
+        stderr.contains("web: 6 target(s) in this pass (titles, no screenshots)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("1/6 target(s) captured, 5 failed (titles only)"),
+        "the live listener records, the wall refuses: {stderr}"
+    );
+    assert!(
+        !argv_dump.exists(),
+        "a titles pass must never spawn the browser"
+    );
+
+    let runs: Vec<String> = fs::read_dir(perim.join("runs"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("web_"))
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let run_dir = perim.join("runs").join(&runs[0]);
+    let run_log = fs::read_to_string(run_dir.join("run.log")).unwrap_or_default();
+    assert!(
+        run_log.contains("mode: titles - HTTP-only, no browser, no screenshots"),
+        "{run_log}"
+    );
+    let st: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("cap_state.json")).unwrap()).unwrap();
+    assert_eq!(st["titles"], true, "{st}");
+    let shots: Vec<String> = fs::read_dir(run_dir.join("shots"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        shots.is_empty(),
+        "no screenshots in a titles pass: {shots:?}"
+    );
+    let manifest = fs::read_to_string(run_dir.join("targets.jsonl")).unwrap();
+    let rows: Vec<serde_json::Value> = manifest
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 6, "one row per target");
+    let live = rows
+        .iter()
+        .find(|r| r["port"] == 47600)
+        .expect("the live target's row");
+    assert_eq!(live["title"], "Big Router", "{live}");
+    assert_eq!(live["status"], 200, "{live}");
+    assert_eq!(live["error"], "", "{live}");
+    assert_eq!(live["shot"], "", "{live}");
+    assert!(
+        live["headers"]
+            .as_str()
+            .unwrap_or("")
+            .contains("bait-httpd"),
+        "headers rode along: {live}"
+    );
+    assert!(
+        rows.iter().all(|r| r["sha256"] == ""),
+        "no digests in a titles pass"
+    );
+
+    // the kind gate: a plain --resume has no matching run (this one is a
+    // titles run) and refuses before touching anything
+    let out = bin()
+        .args(["web", "--out", perim.to_str().unwrap(), "--resume"])
+        .output()
+        .expect("web resume launches");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("nothing to resume"), "{stderr}");
+    assert!(
+        stderr.contains("a titles pass only resumes with --titles"),
+        "{stderr}"
+    );
+
+    // --titles --resume retries the failed set, still browserless: one
+    // more listener is now up and records into the SAME run dir
+    serve_cap_page(47601);
+    let out = bin()
+        .args([
+            "web",
+            "--out",
+            perim.to_str().unwrap(),
+            "--titles",
+            "--resume",
+        ])
+        .env("RUSTRAWL_CHROME_BIN", &fake_chrome)
+        .env("FAKE_CHROME_ARGV", &argv_dump)
+        .output()
+        .expect("web titles resume launches");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("resuming 5 of 6 target(s) (1 captured)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("2/6 target(s) captured, 4 failed (titles only)"),
+        "{stderr}"
+    );
+    assert!(
+        !argv_dump.exists(),
+        "a resumed titles pass must never spawn the browser"
+    );
+    let manifest = fs::read_to_string(run_dir.join("targets.jsonl")).unwrap();
+    assert_eq!(manifest.lines().count(), 6 + 5, "6 rows + 5 retry rows");
+    let shots: Vec<String> = fs::read_dir(run_dir.join("shots"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(shots.is_empty(), "still no screenshots after the resume");
 
     drop(child);
     fs::remove_dir_all(&root).ok();

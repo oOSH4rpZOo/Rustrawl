@@ -1659,6 +1659,7 @@ fn capture_post(out: &Path, body: &[u8]) -> Result<serde_json::Value, Response> 
         crate::capture::DEFAULT_TIMEOUT_SECS,
         threads,
         "click",
+        false,
     )
     .map_err(Response::server_error)?;
     let rows = crate::capture::read_manifest(out, &summary.run_id)
@@ -1697,6 +1698,7 @@ fn captures_json(out: &Path) -> Result<serde_json::Value> {
                         .filter(|t| t.done && !t.error.is_empty())
                         .count(),
                     "chrome": st.chrome,
+                    "titles": st.titles,
                     "started_at": st.started_at,
                 })
             })
@@ -1724,6 +1726,7 @@ fn captures_run_json(out: &Path, run: &str) -> Result<serde_json::Value> {
         "interrupted": st.as_ref().map(|s| s.interrupted).unwrap_or(false),
         "total": st.as_ref().map(|s| s.targets.len()).unwrap_or(targets.len()),
         "done_count": st.as_ref().map(|s| s.done_count()).unwrap_or(0),
+        "titles": st.as_ref().map(|s| s.titles).unwrap_or(false),
         "targets": targets,
     }))
 }
@@ -2040,6 +2043,8 @@ mod tests {
         assert_eq!(v["runs"][0]["total"], 2);
         assert_eq!(v["runs"][0]["done_count"], 2);
         assert_eq!(v["runs"][0]["errors"], 1);
+        // a pre-titles state file (no titles field) reads as screenshots
+        assert_eq!(v["runs"][0]["titles"], false);
 
         let resp = route("GET", &format!("/api/captures/{run}"), &out);
         assert_eq!(resp.status, 200);
@@ -2082,6 +2087,28 @@ mod tests {
         assert_eq!(resp.status, 200);
         let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
         assert_eq!(v["targets"].as_array().unwrap().len(), 0);
+
+        // a titles run announces itself on both endpoints
+        let (run2, _) = fabricate_capture_run(&out, "2026-01-01_120002");
+        let state_path = out
+            .join("runs")
+            .join(&run2)
+            .join(crate::capture::STATE_FILE);
+        let mut st: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+        st["titles"] = serde_json::json!(true);
+        st["chrome"] = serde_json::json!("");
+        std::fs::write(&state_path, serde_json::to_string_pretty(&st).unwrap()).unwrap();
+        let resp = route("GET", "/api/captures", &out);
+        assert_eq!(resp.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
+        assert_eq!(v["runs"][0]["run"], run2.as_str(), "newest run first");
+        assert_eq!(v["runs"][0]["titles"], true);
+        assert_eq!(v["runs"][1]["titles"], false);
+        let resp = route("GET", &format!("/api/captures/{run2}"), &out);
+        assert_eq!(resp.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
+        assert_eq!(v["titles"], true);
     }
 
     /// The per-asset capture route end to end against a dead port: guard,

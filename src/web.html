@@ -411,6 +411,10 @@
     font: 11px/1.5 var(--mono); color: var(--red); padding: 18px 6px;
     text-align: center; border: 1px dashed var(--line); border-radius: 4px;
   }
+  .capquiet {
+    font: 11px/1.5 var(--mono); color: var(--dim); padding: 18px 6px;
+    text-align: center; border: 1px dashed var(--line); border-radius: 4px;
+  }
   .capdup, .caprun { font: 11px/1.5 var(--mono); color: var(--dim); word-break: break-all; }
   .capheaders summary { cursor: pointer; font: 11px/1.5 var(--mono); color: var(--dim); }
   .capheaders pre {
@@ -2159,6 +2163,8 @@ function sheetCap(c) {
     if (c.dup_of) tile.appendChild(el("div", "same image as " + c.dup_of, "capdup"));
   } else if (c.error) {
     tile.appendChild(el("div", c.error, "caperr"));
+  } else {
+    tile.appendChild(el("div", "titles only", "capquiet"));
   }
   const url = el("a", c.url, "capurl");
   url.href = c.url;
@@ -2210,10 +2216,13 @@ async function renderCapture() {
   if (!capRun || !runs.some(r => r.run === capRun)) capRun = runs[0].run;
   const bar = el("div", null, "bar");
   runs.forEach(r => {
-    const b = el("button", r.run + (r.done ? "" : " · running"), "chipbtn" + (r.run === capRun ? " on" : ""));
+    const b = el("button",
+      r.run + (r.titles ? " · titles" : "") + (r.done ? "" : " · running"),
+      "chipbtn" + (r.run === capRun ? " on" : ""));
     b.title = r.done_count + "/" + r.total + " captured" +
       (r.errors ? ", " + r.errors + " failed" : "") +
-      (r.chrome ? "" : " · no browser, headers and titles only");
+      (r.titles ? " · titles only, no screenshots"
+                : (r.chrome ? "" : " · no browser, headers and titles only"));
     b.onclick = () => { capRun = r.run; stopCapturePoll(); renderCapture(); };
     bar.appendChild(b);
   });
@@ -2272,14 +2281,18 @@ function paintCapture(v) {
   const grid = document.getElementById("cap-grid");
   if (!meta || !grid) return;
   meta.textContent = v.done_count + "/" + v.total + " captured" +
+    (v.titles ? " · titles" : "") +
     (v.interrupted ? " · interrupted" : "") +
     (v.done ? "" : " · running… (2 s refresh)");
   grid.replaceChildren(...(v.targets ?? []).map(t => capTile(t)));
 }
 // One target tile: the screenshot when the target kept one (click opens
-// the full PNG), else its error class as the placeholder; url, title and
-// fingerprint label under it, duplicate pointers included. Every field is
-// textContent — a hostile page title stays data.
+// the full PNG), else its error class as the placeholder - or, for a clean
+// titles row (no error, nothing to show), the plain client's HTTP answer
+// as a quiet placeholder: that answer IS the deliverable there, the tile
+// must not read as a failure. url, title and fingerprint label under it,
+// duplicate pointers included. Every field is textContent — a hostile
+// page title stays data.
 function capTile(t) {
   const tile = el("div", null, "captile");
   if (t.shot_url) {
@@ -2294,8 +2307,10 @@ function capTile(t) {
     img.src = t.shot_url;
     a.appendChild(img);
     tile.appendChild(a);
+  } else if (t.error) {
+    tile.appendChild(el("div", t.error, "caperr"));
   } else {
-    tile.appendChild(el("div", t.error || "no image", "caperr"));
+    tile.appendChild(el("div", "HTTP " + (t.status || "?") + " · titles only", "capquiet"));
   }
   const url = el("a", t.url, "capurl");
   url.href = t.url;

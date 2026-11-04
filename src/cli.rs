@@ -180,6 +180,14 @@ pub struct WebArgs {
     /// Parallel captures
     #[arg(long)]
     pub threads: Option<usize>,
+    /// HTTP-only title check (the auxiliary/scanner/http/title shape):
+    /// status, headers, page title and the fingerprint from the plain
+    /// client, no browser - no screenshots, no dedup, no browser-missing
+    /// cards. The run remembers its kind: --resume only continues a run
+    /// of the same kind (a titles pass with --titles, a screenshots pass
+    /// without)
+    #[arg(long)]
+    pub titles: bool,
     /// Continue the newest web pass that has work left: everything it has
     /// not captured yet - failed targets included - is (re)shot into that
     /// same run directory, digest map and manifest rebuilt from what is
