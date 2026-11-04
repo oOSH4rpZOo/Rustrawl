@@ -164,6 +164,13 @@
   tr.click { cursor: pointer; }
   tr.click:hover td { background: var(--accent-soft); }
   .tscroll { overflow-x: auto; }
+  /* The hosts page reads a size up: it is the table the operator stares
+     at while triaging, its cells are short, and the row click target
+     gains from the height. Services and the sheet tables keep the
+     shared sizing. */
+  #hosts { font-size: 14px; }
+  #hosts th { font-size: 12px; }
+  #hosts th, #hosts td { padding: 9px 14px; }
 
   pre {
     background: var(--soft); border: 1px solid var(--line); border-radius: 10px;
@@ -398,6 +405,17 @@
     display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
     gap: 12px; margin: 12px 0;
   }
+  /* The run summary reads grouped: one section per fingerprint type,
+     then the rows with no fingerprint, then the failures. Scanning
+     "every FortiGate" beats scrolling a flat grid of hundreds. */
+  .capgroup { margin: 4px 0 16px; }
+  .capgroup-head {
+    display: flex; align-items: baseline; gap: 8px;
+    font: 600 11px/1.5 var(--mono); text-transform: uppercase;
+    letter-spacing: .06em; color: var(--dim);
+    border-bottom: 1px solid var(--line); padding: 2px 2px 6px;
+  }
+  .capgroup-count { font-weight: 400; }
   .captile {
     border: 1px solid var(--line); border-radius: 8px; padding: 10px;
     display: flex; flex-direction: column; gap: 6px; min-width: 0;
@@ -442,6 +460,7 @@
     aside .perim { display: none; }
     main { margin-left: 0; padding: 12px 14px 60px; }
     th, td { padding: 6px 8px; }
+    #hosts th, #hosts td { padding: 7px 9px; }
   }
 </style>
 </head>
@@ -1138,6 +1157,9 @@ function sortedRows(columns, rows, id) {
 function dataTable(container, columns, rows, onRowClick, id) {
   const st = sortState[id] ?? (sortState[id] = { key: null, dir: 1 });
   const table = el("table");
+  // the sortState key doubles as the DOM id: CSS gets a per-table hook
+  // without a wrapper div (only the hosts table styles by it today)
+  table.id = id;
   const thead = el("thead"), trh = el("tr");
   columns.forEach(c => {
     const th = el("th", c.label);
@@ -2308,7 +2330,7 @@ async function renderCapture() {
   head.appendChild(refresh);
   $view.appendChild(head);
 
-  const grid = el("div", null, "capgrid");
+  const grid = el("div", null, "capwrap");
   grid.id = "cap-grid";
   $view.appendChild(grid);
   // An unfinished run keeps polling from here on (its own tick re-reads
@@ -2334,11 +2356,15 @@ async function loadCaptureGrid(seq) {
 function startCapturePoll() {
   if (capTimer) return;
   capTimer = setInterval(async () => {
+    const run = capRun;
     let v = null;
-    try { v = await api("/api/captures/" + encodeURIComponent(capRun)); } catch { return; }
+    try { v = await api("/api/captures/" + encodeURIComponent(run)); } catch { return; }
     const meta = document.getElementById("cap-meta");
     const grid = document.getElementById("cap-grid");
+    // a tick of the previous run must neither paint over the new run's
+    // view (same ids, rebuilt by renderCapture) nor stop its timer
     if (!meta || !grid) { stopCapturePoll(); return; }
+    if (run !== capRun) return;
     paintCapture(v);
     if (v.done) stopCapturePoll();
   }, 2000);
@@ -2354,7 +2380,38 @@ function paintCapture(v) {
     (v.titles ? " · titles" : "") +
     (v.interrupted ? " · interrupted" : "") +
     (v.done ? "" : " · running… (2 s refresh)");
-  grid.replaceChildren(...(v.targets ?? []).map(t => capTile(t)));
+  // Group by fingerprint type: every labelled row under its label
+  // (alphabetical; a browser-missing FortiGate is still a FortiGate),
+  // then the unlabelled successes, then the failures, each with its
+  // count. The poll rebuilds through here, so groups stay live while a
+  // run finishes; tiles keep the manifest order inside a group.
+  const groups = new Map();
+  const loose = [], failed = [];
+  for (const t of v.targets ?? []) {
+    if (t.label) {
+      if (!groups.has(t.label)) groups.set(t.label, []);
+      groups.get(t.label).push(t);
+    } else if (t.error) failed.push(t);
+    else loose.push(t);
+  }
+  const sections = [...groups.keys()].sort((a, b) => a.localeCompare(b))
+    .map(label => capSection(label, groups.get(label)));
+  if (loose.length) sections.push(capSection("no fingerprint", loose));
+  if (failed.length) sections.push(capSection("failed", failed));
+  grid.replaceChildren(...sections);
+}
+// One grouped section of the capture summary: a count-carrying header
+// over its own tile grid.
+function capSection(label, tiles) {
+  const wrap = el("div", null, "capgroup");
+  const head = el("div", null, "capgroup-head");
+  head.appendChild(el("span", label));
+  head.appendChild(el("span", String(tiles.length), "capgroup-count"));
+  wrap.appendChild(head);
+  const g = el("div", null, "capgrid");
+  g.replaceChildren(...tiles.map(t => capTile(t)));
+  wrap.appendChild(g);
+  return wrap;
 }
 // One target tile: the screenshot when the target kept one (click opens
 // the full PNG), else its error class as the placeholder - or, for a clean

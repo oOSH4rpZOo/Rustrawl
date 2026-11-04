@@ -1630,6 +1630,18 @@ fn capture_pass_shoots_the_registry_web_services() {
         "· titles",
         "titles only, no screenshots",
         "capquiet",
+        // the capture summary groups by fingerprint type, then the
+        // unlabelled rows, then the failures; the live call path is
+        // pinned, not just the helper name or a comment string
+        "capSection(",
+        "capgroup-head",
+        "capSection(\"no fingerprint\", loose)",
+        "capwrap",
+        // the hosts table reads a size up through the dataTable id hook,
+        // on screen and in the phone media query alike
+        "table.id = id",
+        "#hosts {",
+        "#hosts th, #hosts td { padding: 7px 9px; }",
         "rustrawl-show-services",
         "rustrawl-show-hosts",
         // a set bigger than one page paginates instead of cutting

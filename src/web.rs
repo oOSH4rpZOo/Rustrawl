@@ -1710,7 +1710,11 @@ fn captures_json(out: &Path) -> Result<serde_json::Value> {
 /// One capture run's manifest — every target, captured or failed, in the
 /// order the pass walked them.
 fn captures_run_json(out: &Path, run: &str) -> Result<serde_json::Value> {
-    let rows = crate::capture::read_manifest(out, run);
+    // last line per target: a resumed pass leaves the stale line of a
+    // retried target in the append-only manifest, and this endpoint feeds
+    // the grouped summary - "failed" must mean failed NOW, the state the
+    // meta line and the run chip already speak
+    let rows = crate::capture::latest_manifest_rows(crate::capture::read_manifest(out, run));
     let targets = rows
         .iter()
         .map(|r| {
@@ -2109,6 +2113,49 @@ mod tests {
         assert_eq!(resp.status, 200);
         let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
         assert_eq!(v["titles"], true);
+    }
+
+    /// A resumed pass leaves the stale line of each retried target in the
+    /// append-only manifest; the run endpoint serves the LAST line per
+    /// target, so the grouped summary reads the state the meta line speaks
+    /// ("failed" means failed now, and no target counts twice).
+    #[test]
+    fn capture_run_serves_the_last_line_per_target() {
+        let out = seeded("capturesdedup");
+        let run = "web_2026-01-01_120003";
+        let dir = out.join("runs").join(run);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = |url: &str, error: &str, label: &str| {
+            serde_json::json!({
+                "url": url, "ip": "127.0.0.9", "port": 80, "scheme": "http",
+                "status": if error.is_empty() { 200 } else { 0 },
+                "title": "", "label": label, "error": error, "detail": error,
+                "shot": "", "sha256": "", "dup_of": "", "headers": "", "ms": 1,
+                "at": 1767225600
+            })
+            .to_string()
+        };
+        // target A failed in pass 1 and recovered in pass 2 (fresh line
+        // appended, stale one left in the file); target B never retried
+        let manifest = [
+            line("http://127.0.0.9:80/a/", "conn-timeout", ""),
+            line("http://127.0.0.9:80/b/", "", ""),
+            line("http://127.0.0.9:80/a/", "", "nginx"),
+        ]
+        .join("\n");
+        std::fs::write(dir.join(crate::capture::MANIFEST_FILE), manifest + "\n").unwrap();
+        let resp = route("GET", &format!("/api/captures/{run}"), &out);
+        assert_eq!(resp.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body(&resp)).unwrap();
+        let targets = v["targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 2, "a retried target is served once");
+        assert_eq!(targets[0]["url"], "http://127.0.0.9:80/a/");
+        assert_eq!(targets[0]["error"], "", "the recovered line wins");
+        assert_eq!(targets[0]["label"], "nginx");
+        assert_eq!(targets[1]["url"], "http://127.0.0.9:80/b/");
+        assert_eq!(targets[1]["error"], "");
+        // no state file: total falls back to the served (deduped) rows
+        assert_eq!(v["total"], 2);
     }
 
     /// The per-asset capture route end to end against a dead port: guard,

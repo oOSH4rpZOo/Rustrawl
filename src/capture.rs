@@ -1376,6 +1376,32 @@ pub(crate) fn read_manifest(out: &Path, run_id: &str) -> Vec<ManifestRow> {
         .collect()
 }
 
+/// The manifest is append-only: a `--resume` re-shoot appends a fresh line
+/// for every retried target and the stale line stays in the file. Readers
+/// that present a run as its current state (the dashboard) want the LAST
+/// line per target - what cap_state models - so a target recovered by a
+/// resume neither lingers under its old failure nor counts twice. Rows
+/// keep first-appearance order; rows without a url pass through (never
+/// collapsed together).
+pub(crate) fn latest_manifest_rows(rows: Vec<ManifestRow>) -> Vec<ManifestRow> {
+    let mut latest: Vec<ManifestRow> = Vec::with_capacity(rows.len());
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for row in rows {
+        if row.url.is_empty() {
+            latest.push(row);
+            continue;
+        }
+        match at.get(&row.url) {
+            Some(&i) => latest[i] = row,
+            None => {
+                at.insert(row.url.clone(), latest.len());
+                latest.push(row);
+            }
+        }
+    }
+    latest
+}
+
 /// One host's capture rows, newest runs first, bounded — the sheet section
 /// walks at most `max_runs` recent capture passes and stops at `max_rows`.
 pub(crate) fn host_captures(
@@ -1386,7 +1412,10 @@ pub(crate) fn host_captures(
 ) -> Vec<ManifestRow> {
     let mut rows = Vec::new();
     for run in list_runs(out).into_iter().take(max_runs) {
-        for r in read_manifest(out, &run) {
+        // dedupe within the run: a resumed pass leaves the stale line of a
+        // retried target in the manifest, and the sheet shows state, not
+        // attempt history
+        for r in latest_manifest_rows(read_manifest(out, &run)) {
             if r.ip == ip {
                 rows.push(ManifestRow {
                     run: run.clone(),
@@ -1506,6 +1535,44 @@ pub fn run(args: &WebArgs) -> Result<()> {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn latest_manifest_rows_keeps_the_last_line_per_url() {
+        let row = |s: &str| -> ManifestRow { serde_json::from_str(s).unwrap() };
+        let a_fail = row(
+            r#"{"url":"http://127.0.0.9:80/a/","ip":"127.0.0.9","port":80,
+                "scheme":"http","error":"conn-timeout"}"#,
+        );
+        let b_ok = row(
+            r#"{"url":"http://127.0.0.9:80/b/","ip":"127.0.0.9","port":80,
+                "scheme":"http"}"#,
+        );
+        let a_ok = row(
+            r#"{"url":"http://127.0.0.9:80/a/","ip":"127.0.0.9","port":80,
+                "scheme":"http","label":"nginx"}"#,
+        );
+        // a resumed pass: A failed then recovered, B untouched - the last
+        // line per url wins, first-appearance order survives, and rows
+        // without a url (corrupt lines tolerated by the reader) pass
+        // through instead of collapsing together
+        let mut corrupt = b_ok.clone();
+        corrupt.url = String::new();
+        let rows = latest_manifest_rows(vec![a_fail, b_ok.clone(), a_ok, corrupt.clone()]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0].url, "http://127.0.0.9:80/a/",
+            "first appearance order"
+        );
+        assert_eq!(rows[0].label, "nginx", "the recovered line wins");
+        assert_eq!(rows[0].error, "");
+        assert_eq!(rows[1].url, "http://127.0.0.9:80/b/");
+        assert_eq!(rows[1].error, "", "untouched row carried");
+        assert_eq!(rows[2].url, "", "url-less rows never collapse together");
+        assert_eq!(rows[2].error, b_ok.error);
+        // dedupe twice is stable
+        let again = latest_manifest_rows(vec![corrupt.clone(), corrupt]);
+        assert_eq!(again.len(), 2);
+    }
 
     #[test]
     fn classification_mirrors_the_dashboard_links() {
