@@ -19,9 +19,11 @@
 //! main thread alone writes the registry and names.log, so the
 //! buffered-Vec writer never sees two threads. Transport failures never
 //! fail the run — they are log lines and summary counts; only registry or
-//! configuration errors exit non-zero. Progress goes to names.log only
-//! (unlike the engine runs' mirrored stderr: hundreds of endpoints would
-//! drown the summary), and one stderr block closes the run.
+//! configuration errors exit non-zero. Per-endpoint detail goes to
+//! names.log only (hundreds of endpoints would drown the screen); the
+//! few lines an operator watches — run header, inventory, the wave
+//! tallies — are mirrored to stderr as they happen, and one stderr
+//! block closes the run.
 //!
 //! No SIGINT handler: a run lasts seconds (a couple of timeouts per
 //! endpoint at worst), and the registry writes are one flush at the end —
@@ -150,6 +152,35 @@ pub(crate) fn sanitize_name(raw: &str) -> String {
         .to_string()
 }
 
+/// The --domain list, sanitized like the names it will meet (lowercased,
+/// control characters and edge dots off); empties drop out.
+fn domain_list(specs: &[String]) -> Vec<String> {
+    specs
+        .iter()
+        .map(|s| sanitize_name(s))
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
+/// The --domain keep-list rule: no listed domain, everything passes
+/// (yesterday's behavior); otherwise a name qualifies when the domain
+/// after its first label equals one of them or lives under one —
+/// `corp.example.com` keeps `a.b.corp.example.com`, drops
+/// `ip-10-1-2-3.eu-west-3.compute.internal`, ISP PTRs and single labels.
+/// The match is label-bounded (`xcorp.example.com` is NOT under
+/// `corp.example.com`).
+fn domain_in_list(domains: &[String], name: &str) -> bool {
+    if domains.is_empty() {
+        return true;
+    }
+    let Some(domain) = name.split_once('.').map(|(_, d)| d) else {
+        return false;
+    };
+    domains
+        .iter()
+        .any(|d| domain == d.as_str() || domain.ends_with(&format!(".{d}")))
+}
+
 /// The run's inventory, read once from the registry.
 struct Inventory {
     /// Assets the discovery confirmed up — the only IPs a name may attach
@@ -260,22 +291,31 @@ fn derive_zones(explicit: &[String], verified_names: &[String]) -> Vec<String> {
 }
 
 /// Everything a worker needs: the resolver order, the per-socket timeout,
-/// and the LDAP auth (built once from the env var, shared read-only).
+/// the LDAP auth (built once from the env var, shared read-only) and the
+/// --domain keep-list (empty when the flag was not given).
 struct RunCtx {
     resolvers: Vec<SocketAddr>,
     timeout: Duration,
     auth: ldap::LdapAuth,
+    domains: Vec<String>,
 }
 
 /// One PTR job: walk the resolver order until a definitive answer — only a
-/// transport failure (or a SERVFUL-class rcode) advances. Verified names
-/// report as `dns-ptr` finds; stale ones and empties are log lines.
+/// transport failure (or a SERVFUL-class rcode) advances. In-scope verified
+/// names report as `dns-ptr` finds; out-of-scope ones and stale ones are
+/// log lines.
 fn ptr_msgs(ctx: &RunCtx, ip: Ipv4Addr) -> Vec<Msg> {
     let mut msgs = Vec::new();
     for resolver in &ctx.resolvers {
         match dns::query_ptr(*resolver, ip, ctx.timeout) {
             dns::PtrOutcome::Answer { verified, dropped } => {
                 for name in &verified {
+                    if !domain_in_list(&ctx.domains, name) {
+                        msgs.push(Msg::Touched(format!(
+                            "ptr {ip} {name} (verified, outside the domain list - not recorded)"
+                        )));
+                        continue;
+                    }
                     msgs.push(Msg::Touched(format!("ptr {ip} {name} (verified)")));
                     msgs.push(Msg::Found {
                         ip,
@@ -322,11 +362,17 @@ fn axfr_msgs(ctx: &RunCtx, resolver: SocketAddr, zone: &str) -> Vec<Msg> {
                 records.len()
             ))];
             for (name, ip) in records {
-                msgs.push(Msg::Found {
-                    ip,
-                    name,
-                    source: "dns-axfr",
-                });
+                if domain_in_list(&ctx.domains, &name) {
+                    msgs.push(Msg::Found {
+                        ip,
+                        name,
+                        source: "dns-axfr",
+                    });
+                } else {
+                    msgs.push(Msg::Touched(format!(
+                        "axfr {zone} via {resolver}: {name} outside the domain list - log-only"
+                    )));
+                }
             }
             msgs
         }
@@ -363,11 +409,17 @@ fn cert_msgs(ctx: &RunCtx, ip: Ipv4Addr, port: u16) -> Vec<Msg> {
                 names.san.join(", ")
             ))];
             for name in seen {
-                msgs.push(Msg::Found {
-                    ip,
-                    name,
-                    source: "tls",
-                });
+                if domain_in_list(&ctx.domains, &name) {
+                    msgs.push(Msg::Found {
+                        ip,
+                        name,
+                        source: "tls",
+                    });
+                } else {
+                    msgs.push(Msg::Touched(format!(
+                        "tls {ip}:{port}: {name} outside the domain list - log-only"
+                    )));
+                }
             }
             msgs
         }
@@ -407,6 +459,13 @@ fn ldap_msgs(ctx: &RunCtx, ip: Ipv4Addr, port: u16) -> Vec<Msg> {
                     continue;
                 };
                 if host.is_empty() {
+                    continue;
+                }
+                // Out of the --domain keep-list: not worth the A query.
+                if !domain_in_list(&ctx.domains, &host) {
+                    msgs.push(Msg::Touched(format!(
+                        "ldap {ip}:{port}: {host} outside the domain list - log-only"
+                    )));
                     continue;
                 }
                 // D3: resolve through the known resolvers, first definitive
@@ -505,10 +564,19 @@ fn run_wave(jobs: Vec<Job>, ctx: Arc<RunCtx>, on_msg: &mut impl FnMut(Msg)) {
     });
 }
 
-/// Names-only run log: file only — a real perimeter has hundreds of
-/// endpoints and the stderr copy belongs to the closing summary.
+/// Names-only run log: per-endpoint detail stays file-only — a real
+/// perimeter has hundreds of endpoints and the stderr copy would drown
+/// the closing summary.
 fn slog(log: &mut std::fs::File, line: &str) {
     let _ = writeln!(log, "{line}");
+}
+
+/// The few lines an operator watches (run header, inventory, domain
+/// filter, wave tallies): logged AND mirrored to stderr, so a run shows
+/// life on screen without the per-endpoint noise.
+fn slog_echo(log: &mut std::fs::File, line: &str) {
+    slog(log, line);
+    eprintln!("{line}");
 }
 
 pub fn run(a: &NamesArgs) -> Result<()> {
@@ -522,7 +590,7 @@ pub fn run(a: &NamesArgs) -> Result<()> {
     let run_dir = state::create_run(&a.out, &run_id)?;
     let mut log = state::open_run_log_as(&run_dir, "names.log")?;
 
-    slog(
+    slog_echo(
         &mut log,
         &format!(
             "names {run_id}: sources {} timeout {}s",
@@ -544,7 +612,7 @@ pub fn run(a: &NamesArgs) -> Result<()> {
     let mut resolvers = inv.resolvers.clone();
     if resolvers.is_empty() {
         resolvers = system_resolvers();
-        slog(
+        slog_echo(
             &mut log,
             &format!(
                 "no resolver in --dns or the registry - falling back to /etc/resolv.conf ({} server(s))",
@@ -552,7 +620,7 @@ pub fn run(a: &NamesArgs) -> Result<()> {
             ),
         );
     }
-    slog(
+    slog_echo(
         &mut log,
         &format!(
             "{} asset(s), {} resolver(s) ({} from the registry)",
@@ -561,6 +629,17 @@ pub fn run(a: &NamesArgs) -> Result<()> {
             inv.registry_resolvers
         ),
     );
+
+    let domains = domain_list(&a.domain);
+    if !domains.is_empty() {
+        slog_echo(
+            &mut log,
+            &format!(
+                "domain filter: {} (everything else log-only)",
+                domains.join(", ")
+            ),
+        );
+    }
 
     if sources.ldap {
         slog(
@@ -587,6 +666,7 @@ pub fn run(a: &NamesArgs) -> Result<()> {
         resolvers: resolvers.clone(),
         timeout,
         auth,
+        domains,
     });
 
     // Wave 1: one PTR job per known asset. The verified names fall out of
@@ -624,6 +704,8 @@ pub fn run(a: &NamesArgs) -> Result<()> {
             run_wave(jobs, Arc::clone(&ctx), &mut on_msg);
         }
     }
+    let ptr_rows = counts.get("dns-ptr").copied().unwrap_or(0);
+    slog_echo(&mut log, &format!("ptr wave done: {ptr_rows} name row(s)"));
     // Wave 2: AXFR per (resolver, zone) plus the certificate reads — one
     // pool run for both. `run_wave` early-returns when dns was off or no
     // target came out of the inventory.
@@ -694,6 +776,17 @@ pub fn run(a: &NamesArgs) -> Result<()> {
         };
         run_wave(jobs, Arc::clone(&ctx), &mut on_msg);
     }
+    let n_rows = |k: &str| counts.get(k).copied().unwrap_or(0);
+    slog_echo(
+        &mut log,
+        &format!(
+            "wave 2 done: {} name row(s) (dns-axfr {}, tls {}, ldap {})",
+            n_rows("dns-axfr") + n_rows("tls") + n_rows("ldap") + n_rows("ldap-sam"),
+            n_rows("dns-axfr"),
+            n_rows("tls"),
+            n_rows("ldap") + n_rows("ldap-sam"),
+        ),
+    );
 
     db.flush().context("writing the registry")?;
     db.checkpoint().context("checkpointing the registry")?;
@@ -847,6 +940,23 @@ mod tests {
                             r.extend_from_slice(&answer_rr(1, vec![127, 0, 0, 2]));
                             r
                         }
+                        (12, "4.0.0.127.in-addr.arpa") => {
+                            // verified by the forward A, but the AWS default
+                            // shape: with --domain corp.example.com it must
+                            // stay log-only, out of the registry and out of
+                            // the derived AXFR zones
+                            let mut r = reply(txid, question, 0, false, 1);
+                            r.extend_from_slice(&answer_rr(
+                                12,
+                                ptr_rdata("ip-10-0-0-4.eu-west-3.compute.internal"),
+                            ));
+                            r
+                        }
+                        (1, "ip-10-0-0-4.eu-west-3.compute.internal") => {
+                            let mut r = reply(txid, question, 0, false, 1);
+                            r.extend_from_slice(&answer_rr(1, vec![127, 0, 0, 4]));
+                            r
+                        }
                         _ => reply(txid, question, 3, false, 0), // NXDOMAIN
                     };
                     let _ = udp.send_to(&out, peer);
@@ -933,9 +1043,11 @@ mod tests {
         {
             let mut db = Db::open(&root).unwrap();
             db.set_run_id("discovery_test");
-            // the asset with a verified PTR, the asset with a stale one
+            // the asset with a verified PTR, the asset with a stale one,
+            // the asset with a verified-but-out-of-domain AWS default
             db.record_host(Ipv4Addr::new(127, 0, 0, 2), Stage::Sweep, true, 2);
             db.record_host(Ipv4Addr::new(127, 0, 0, 3), Stage::Sweep, true, 2);
+            db.record_host(Ipv4Addr::new(127, 0, 0, 4), Stage::Sweep, true, 2);
             db.flush().unwrap();
         }
 
@@ -943,6 +1055,7 @@ mod tests {
             out: root.clone(),
             dns: vec![resolver.to_string()],
             zone: vec![],
+            domain: vec!["corp.example.com".to_string()],
             sources: vec![],
             timeout: 2,
         };
@@ -973,6 +1086,12 @@ mod tests {
                 ),
             ],
             "verified PTR + AXFR for the known asset; stale and foreign stay out"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|(_, name, _)| name.contains("compute.internal")),
+            "the AWS default name must stay out of the registry"
         );
 
         // names.log: the whole trail, including the dropped and log-only
@@ -1006,6 +1125,24 @@ mod tests {
         );
         assert!(log_text.starts_with("names names_"), "{log_text}");
         assert!(log_text.contains("done:"), "{log_text}");
+        assert!(
+            log_text.contains(
+                "ptr 127.0.0.4 ip-10-0-0-4.eu-west-3.compute.internal (verified, outside the domain list - not recorded)"
+            ),
+            "{log_text}"
+        );
+        assert!(
+            !log_text.contains("axfr eu-west-3.compute.internal"),
+            "an out-of-domain name must not seed an AXFR zone: {log_text}"
+        );
+        assert!(
+            log_text.contains("ptr wave done: 1 name row(s)"),
+            "{log_text}"
+        );
+        assert!(
+            log_text.contains("wave 2 done: 1 name row(s) (dns-axfr 1, tls 0, ldap 0)"),
+            "{log_text}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1032,6 +1169,34 @@ mod tests {
         let dns_only = Sources::parse(&["dns".to_string(), "dns".to_string()]).unwrap();
         assert!(dns_only.dns && !dns_only.tls && !dns_only.ldap);
         assert!(Sources::parse(&["kerberos".to_string()]).is_err());
+    }
+
+    #[test]
+    fn domain_filter_is_label_bounded_and_empty_passes_everything() {
+        // The flag's values get the same sanitizer as the wire names.
+        assert_eq!(
+            domain_list(&["Corp.Example.COM.".to_string()]),
+            vec!["corp.example.com".to_string()]
+        );
+        let domains = domain_list(&["corp.example.com".to_string()]);
+        // No --domain at all: yesterday's behavior, everything is recorded.
+        assert!(domain_in_list(
+            &[],
+            "ip-10-0-0-4.eu-west-3.compute.internal"
+        ));
+        assert!(domain_in_list(&[], "singlelabel"));
+
+        // In scope: the domain itself, a subdomain of it.
+        assert!(domain_in_list(&domains, "web01.corp.example.com"));
+        assert!(domain_in_list(&domains, "a.b.corp.example.com"));
+        // Out: cloud defaults, lookalike labels, single labels, others.
+        assert!(!domain_in_list(
+            &domains,
+            "ip-10-0-0-4.eu-west-3.compute.internal"
+        ));
+        assert!(!domain_in_list(&domains, "xcorp.example.com"));
+        assert!(!domain_in_list(&domains, "singlelabel"));
+        assert!(!domain_in_list(&domains, "mail.other.example"));
     }
 
     #[test]
@@ -1193,6 +1358,7 @@ mod tests {
             resolvers: Vec::new(),
             timeout: Duration::from_secs(2),
             auth: ldap::LdapAuth::Anonymous,
+            domains: Vec::new(),
         };
         let ip = match addr.ip() {
             IpAddr::V4(v4) => v4,
@@ -1246,6 +1412,7 @@ mod tests {
             resolvers: vec![resolver],
             timeout: Duration::from_secs(2),
             auth: ldap::LdapAuth::Anonymous,
+            domains: Vec::new(),
         };
         let lip = match laddr.ip() {
             IpAddr::V4(v4) => v4,
@@ -1302,6 +1469,7 @@ mod tests {
             resolvers: Vec::new(), // nothing to resolve with
             timeout: Duration::from_secs(2),
             auth: ldap::LdapAuth::Anonymous,
+            domains: Vec::new(),
         };
         let lip = match laddr.ip() {
             IpAddr::V4(v4) => v4,

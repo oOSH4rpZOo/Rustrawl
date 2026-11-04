@@ -36,7 +36,8 @@ pub enum Command {
     /// DNS PTR through the resolvers already in the registry (verified by a
     /// forward A), AXFR attempts on the zones the names imply, TLS
     /// certificate CN/SAN on the HTTPS services, LDAP machine accounts
-    /// (RUSTRAWL_LDAP_BIND env for credentials, never a flag)
+    /// (RUSTRAWL_LDAP_BIND env for credentials, never a flag); --domain
+    /// keep-lists the name domains worth recording, the rest is log-only
     Names(NamesArgs),
     /// EyeWitness-style capture pass over the registry's web services
     /// (any port the registry classifies http/https): one headless-chromium
@@ -149,6 +150,14 @@ pub struct NamesArgs {
     /// labels of every verified PTR name)
     #[arg(long)]
     pub zone: Vec<String>,
+    /// Keep only names under these domains, repeatable: a name qualifies
+    /// when the domain after its first label equals one of them or lives
+    /// under one (`--domain corp.example.com` keeps a.b.corp.example.com,
+    /// drops cloud defaults like ip-10-1-2-3.eu-west-3.compute.internal
+    /// and ISP PTRs). Dropped names stay in names.log, never in the
+    /// registry. Without it, every verified name is recorded
+    #[arg(long)]
+    pub domain: Vec<String>,
     /// Which collectors to run, comma-separated: dns (PTR + AXFR), tls
     /// (certificate names on 443/8443/https), ldap (machine accounts on 389).
     /// Default: all of them

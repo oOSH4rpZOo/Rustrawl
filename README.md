@@ -56,7 +56,7 @@ Everything discovered stays inside `includes` minus `excludes`, always.
 ```
 rustrawl run  scope.yaml --out data/acme [--mode auto|syn|connect] [--resume] [--force] [--dry-run]
 rustrawl scan scope.yaml --out data/acme [--nmap-args "..."] [--profile "range=args"] [--threads 4]
-rustrawl names --out data/acme [--dns ip:port] [--zone domain] [--sources dns,tls,ldap]
+rustrawl names --out data/acme [--dns ip:port] [--zone domain] [--domain domain] [--sources dns,tls,ldap]
 rustrawl web  --out data/acme [--timeout 7] [--threads 4]
 rustrawl db   --out data/acme              # interactive console
 rustrawl db   --out data/acme stats        # counts + run outcomes
@@ -96,7 +96,13 @@ Collects hostnames for known assets without rescanning: verified DNS
 PTR, one-attempt AXFR, TLS certificate CN/SAN, LDAP machine accounts. It
 only touches endpoints the registry already lists. LDAP credentials come
 from the environment: `RUSTRAWL_LDAP_BIND=user:password` (cleartext on
-389, the run warns about it).
+389, the run warns about it). `--domain corp.example.com` (repeatable)
+keeps only names under the listed domains: cloud defaults
+(`ip-10-1-2-3.eu-west-3.compute.internal`), ISP PTRs and vendor suffixes
+stay out of the registry - they remain in `names.log`. Without it every
+verified name is recorded. The screen shows the run header, the
+inventory and the per-wave tallies; the per-endpoint detail lives in the
+log.
 
 ### web (screenshot evidence)
 
