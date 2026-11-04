@@ -30,8 +30,10 @@
 //! No cap and no wall clock: a pass over a big registry runs to
 //! completion — `^C` is safe and `--resume` finishes an interrupted pass
 //! (failed targets included) into the same run directory, dedup intact.
-//! Progress rides stderr every 50 completions; the dashboard's per-asset
-//! click stays bounded per asset, bulk work belongs to this CLI.
+//! Resume picks passes only: a dashboard click run is re-runnable from
+//! its button and is never resumed. Progress rides stderr every 50
+//! completions; the dashboard's per-asset click stays bounded per asset,
+//! bulk work belongs to this CLI.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -769,6 +771,12 @@ pub(crate) struct CapState {
     /// Resolved browser binary, or "" when the run has no screenshots.
     #[serde(default)]
     pub(crate) chrome: String,
+    /// Who created the run: "pass" (the CLI) or "click" (one dashboard
+    /// per-asset button). `--resume` picks passes only: a click run is
+    /// re-runnable from its button, and its one dead target must never
+    /// shadow a bulk pass with hours of work left.
+    #[serde(default)]
+    pub(crate) origin: String,
     pub(crate) targets: Vec<CapTargetState>,
 }
 
@@ -862,6 +870,7 @@ pub(crate) fn run_pass(
     targets: Vec<CaptureTarget>,
     timeout_secs: u64,
     threads: usize,
+    origin: &str,
 ) -> Result<RunSummary> {
     let run_id = state::stamped_id("web");
     let run_dir = state::create_run(out, &run_id)?;
@@ -885,6 +894,7 @@ pub(crate) fn run_pass(
         done: false,
         interrupted: false,
         chrome: chrome.clone().unwrap_or_default(),
+        origin: origin.to_string(),
         targets: targets
             .iter()
             .map(|t| CapTargetState {
@@ -910,13 +920,16 @@ pub(crate) fn run_pass(
     )
 }
 
-/// The newest web run with work left, oldest complete runs skipped: a pass
-/// is resumable while some target has no successful capture — undone
-/// (`^C`, crash) or failed (a conn-level miss is retried; resume finishes
-/// the set). Returns the run identity, its state, the todo indices into
-/// `st.targets`, the same work as `CaptureTarget`s, and the screenshot
-/// digest map rebuilt from the manifest so the resumed pass dedupes
-/// against the shots already on disk. `None` = everything captured.
+/// The newest web PASS with work left, oldest complete runs skipped
+/// (dashboard click runs are never resumed - they are re-runnable from
+/// their button, and their one dead target must not shadow a bulk pass):
+/// a pass is resumable while some target has no successful capture -
+/// undone (`^C`, crash) or failed (a conn-level miss is retried; resume
+/// finishes the set). Returns the run identity, its state, the todo
+/// indices into `st.targets`, the same work as `CaptureTarget`s, and the
+/// screenshot digest map rebuilt from the manifest so the resumed pass
+/// dedupes against the shots already on disk. `None` = everything
+/// captured.
 type ResumablePass = (
     String,
     PathBuf,
@@ -931,6 +944,9 @@ fn find_resumable(out: &Path) -> Result<Option<ResumablePass>> {
         let Some(st) = read_cap_state(out, &run) else {
             continue; // torn or hand-removed state is not a resume truth
         };
+        if st.origin == "click" {
+            continue;
+        }
         let todo: Vec<usize> = st
             .targets
             .iter()
@@ -982,6 +998,19 @@ fn elapsed_of(started: Instant) -> String {
     }
 }
 
+/// The digest's known owner, unless that owner is this very target: a
+/// hard kill between a manifest append and the state flush leaves the
+/// target's own canonical row behind (up to one flush window of lag),
+/// and re-shooting it must not turn it into a duplicate of itself.
+fn dup_target(digests: &HashMap<String, String>, hex: &str, url: &str) -> String {
+    let dup = digests.get(hex).cloned().unwrap_or_default();
+    if dup == url {
+        String::new()
+    } else {
+        dup
+    }
+}
+
 /// The dispatch-and-collect core, shared by a fresh pass and a resumed
 /// one: `todo` holds the indices into `st.targets` still to (re)shoot,
 /// `targets` the same work as CaptureTargets in the same order, `digests`
@@ -1022,8 +1051,13 @@ fn execute_pass(
     // while this segment runs. Written before dispatch so the dashboard
     // never sees a stale "done" pass as running.
     st.done = false;
+    st.interrupted = false;
     st.timeout_secs = timeout_secs;
     st.threads = threads;
+    // The resumed segment's own truth: a pass started before chromium was
+    // installed must not keep claiming headers-only once its retry takes
+    // screenshots (and the other way around).
+    st.chrome = chrome.clone().unwrap_or_default();
     write_cap_state(&run_dir, &st)?;
 
     let targets = Arc::new(targets);
@@ -1117,7 +1151,7 @@ fn execute_pass(
             let (shot, sha_hex, dup_of) = match &oc.png {
                 Some(bytes) => {
                     let hex = crate::web::hex(&crate::web::sha256(bytes));
-                    let dup_of = digests.get(&hex).cloned().unwrap_or_default();
+                    let dup_of = dup_target(&digests, &hex, &t.url());
                     if dup_of.is_empty() {
                         digests.insert(hex.clone(), t.url());
                         let path = run_dir.join("shots").join(format!("{hex}.png"));
@@ -1346,7 +1380,8 @@ pub fn run(args: &WebArgs) -> Result<()> {
     let summary = if args.resume {
         let Some((run_id, run_dir, st, todo, targets, digests)) = find_resumable(&args.out)? else {
             bail!(
-                "nothing to resume - every web run is complete (or there is none); \
+                "nothing to resume - every web pass is complete (or there is none; \
+                 dashboard click runs are never resumed); \
                  run without --resume for a fresh pass"
             );
         };
@@ -1386,7 +1421,7 @@ pub fn run(args: &WebArgs) -> Result<()> {
             "web: {} target(s) in this pass - ^C is safe, --resume continues an interrupted pass",
             targets.len()
         );
-        run_pass(&args.out, targets, args.timeout, threads)?
+        run_pass(&args.out, targets, args.timeout, threads, "pass")?
     };
     eprintln!(
         "web {}: {}/{} target(s) captured, {} failed, {} duplicate screenshot(s){} - evidence in {}",
@@ -1776,6 +1811,23 @@ mod tests {
     }
 
     #[test]
+    fn dup_target_never_makes_a_target_its_own_duplicate() {
+        let mut digests = HashMap::new();
+        digests.insert("h1".to_string(), "http://10.0.0.1:80/".to_string());
+        // a known owner that is not this target: a duplicate
+        assert_eq!(
+            dup_target(&digests, "h1", "http://10.0.0.2:80/"),
+            "http://10.0.0.1:80/"
+        );
+        // the digest's owner IS this target - a crash-window leftover
+        // (manifest appended, state flush lagging): canonical, never a
+        // self-reference
+        assert_eq!(dup_target(&digests, "h1", "http://10.0.0.1:80/"), "");
+        // unknown digest: canonical
+        assert_eq!(dup_target(&digests, "h2", "http://10.0.0.3:80/"), "");
+    }
+
+    #[test]
     fn find_resumable_picks_the_newest_pass_with_work_left() {
         let root = std::env::temp_dir().join(format!(
             "rustrawl-cap-resume-{}-{}",
@@ -1826,9 +1878,22 @@ mod tests {
                                  "sha256": "a".repeat(64), "dup_of": ""}),
             ],
         );
+        // NEWEST of all: a dashboard click run with work left. It must be
+        // skipped - it is re-runnable from its button, and its one dead
+        // target must never shadow the pass below.
+        st_write(
+            "web_2026-01-03_030303",
+            serde_json::json!({"run": "web_2026-01-03_030303", "started_at": 0,
+                "timeout_secs": 7, "threads": 3, "done": true, "origin": "click",
+                "targets": [target("127.0.0.9", false, "")]}),
+            &[],
+        );
 
         let found = find_resumable(&perim).unwrap().expect("a resumable pass");
-        assert_eq!(found.0, "web_2026-01-02_020202");
+        assert_eq!(
+            found.0, "web_2026-01-02_020202",
+            "the click run (newest, work left) is skipped; the pass wins"
+        );
         assert_eq!(
             found.3,
             vec![1, 2],

@@ -180,10 +180,11 @@ pub struct WebArgs {
     /// Parallel captures
     #[arg(long)]
     pub threads: Option<usize>,
-    /// Continue the newest web run that has work left: everything it has
+    /// Continue the newest web pass that has work left: everything it has
     /// not captured yet - failed targets included - is (re)shot into that
     /// same run directory, digest map and manifest rebuilt from what is
-    /// already there. Without it, a fresh pass re-shoots every target
+    /// already there. Dashboard click runs are never resumed (re-run from
+    /// the button). Without it, a fresh pass re-shoots every target
     #[arg(long)]
     pub resume: bool,
 }

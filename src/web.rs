@@ -1653,9 +1653,14 @@ fn capture_post(out: &Path, body: &[u8]) -> Result<serde_json::Value, Response> 
         }
     };
     let threads = targets.len().min(crate::capture::DEFAULT_THREADS);
-    let summary =
-        crate::capture::run_pass(out, targets, crate::capture::DEFAULT_TIMEOUT_SECS, threads)
-            .map_err(Response::server_error)?;
+    let summary = crate::capture::run_pass(
+        out,
+        targets,
+        crate::capture::DEFAULT_TIMEOUT_SECS,
+        threads,
+        "click",
+    )
+    .map_err(Response::server_error)?;
     let rows = crate::capture::read_manifest(out, &summary.run_id)
         .into_iter()
         .map(|mut r| {

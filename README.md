@@ -118,7 +118,9 @@ No target cap: a pass over a big registry runs to completion, `^C` is
 safe and `web --resume` finishes the interrupted pass into the same run
 (failed targets retried, dedup intact). Progress prints every 50
 completions. `--threads` goes up to 32; the dashboard's per-asset
-capture stays bounded at 512 targets per host.
+capture stays bounded at 512 targets per host, and its click runs are
+never resumed (re-run from the button) so one dead port cannot shadow
+a bulk pass.
 
 ## Read the results
 

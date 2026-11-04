@@ -1627,10 +1627,12 @@ fn capture_pass_shoots_the_registry_web_services() {
         "the cap select must not claim the export select's xsel marker"
     );
 
-    // ── resume: the newest run with work left wins ─────────────────────
-    // the click's run (2 clean, 1 conn-refused) is resumable; the retried
-    // target lands in that same run directory, the clean rows stay
-    // untouched, and a conn-level retry never spawns chromium
+    // ── resume: passes only, clicks never ──────────────────────────────
+    // the click's run (2 clean, 1 conn-refused) is the NEWEST run with
+    // work left, but a click run is re-runnable from its button: --resume
+    // must skip it and finish the older CLI pass (2 captured, 7 refused)
+    // instead - one dead port on a button must never shadow a pass with
+    // real work left. The click's run stays exactly as the button wrote it.
     let resume_argv = root.join("fake-chrome-resume.argv");
     let out = bin()
         .args(["web", "--out", perim.to_str().unwrap(), "--resume"])
@@ -1642,50 +1644,32 @@ fn capture_pass_shoots_the_registry_web_services() {
     assert!(out.status.success(), "{stderr}");
     assert!(
         stderr.contains(&format!(
-            "web {run2}: resuming 1 of 3 target(s) (2 captured)"
+            "web {run_id}: resuming 7 of 9 target(s) (2 captured)"
         )),
-        "{stderr}"
+        "the pass resumes, never the click: {stderr}"
     );
     assert!(
-        stderr.contains("2/3 target(s) captured, 1 failed, 1 duplicate screenshot(s)"),
+        stderr.contains("2/9 target(s) captured, 7 failed"),
         "{stderr}"
     );
+    // the click's run untouched: exactly the button's 3 rows, still the
+    // button's own budget, no resume rows landed in it
     let manifest = fs::read_to_string(ui_run_dir.join("targets.jsonl")).unwrap();
     assert_eq!(
         manifest.lines().count(),
-        4,
-        "3 click rows + 1 retry: {manifest}"
-    );
-    let ui_shots: Vec<String> = fs::read_dir(ui_run_dir.join("shots"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(
-        ui_shots.len(),
-        1,
-        "a retry adds no screenshot: {ui_shots:?}"
-    );
-    assert!(
-        !resume_argv.exists(),
-        "a conn-level retry never spawns chromium, so no argv dump"
+        3,
+        "a click run never gains resume rows: {manifest}"
     );
     let st: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(ui_run_dir.join("cap_state.json")).unwrap())
             .unwrap();
-    assert_eq!(st["done"], true, "{st}");
-    assert_eq!(st["interrupted"], false, "{st}");
-    assert!(
-        st["targets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|t| t["done"] == true),
-        "the retried row is done again: {st}"
-    );
     assert_eq!(
-        st["threads"], 4,
-        "the resume's own CLI budget wins over the click's: {st}"
+        st["threads"], 3,
+        "the click's budget survives the CLI resume untouched: {st}"
+    );
+    assert!(
+        !resume_argv.exists(),
+        "the pass's conn-level retries never spawn chromium, so no argv dump"
     );
     let web_runs: Vec<String> = fs::read_dir(perim.join("runs"))
         .unwrap()
@@ -1703,11 +1687,13 @@ fn capture_pass_shoots_the_registry_web_services() {
     fs::remove_dir_all(&root).ok();
 }
 
-/// No cap on the CLI pass: 530 classified web services (one host, a wall
-/// of closed 47xxx ports) shoot end to end - the old 512 refusal is gone,
-/// progress lines ride stderr every 50 completions, the dashboard's
-/// per-asset click stays bounded (400 over the per-asset cap), and a
-/// resume re-shoots the all-failed set into the same single run dir.
+/// No cap on the CLI pass: 530 classified web services (one host - a wall
+/// of closed 47xxx ports plus one live listener) shoot end to end - the
+/// old 512 refusal is gone, progress rides stderr (and run.log) at exactly
+/// one line per 50 completions, the threads contract bails past 32, the
+/// dashboard's per-asset click stays bounded (400 over the per-asset cap),
+/// and a resume retries the wall into the same single run dir while one
+/// more live listener's screenshot dedupes against pass 1's digest.
 #[test]
 fn capture_pass_has_no_target_cap_and_per_asset_stays_bounded() {
     let root = temp_root("capnocap");
@@ -1770,8 +1756,45 @@ fn capture_pass_has_no_target_cap_and_per_asset_stays_bounded() {
     assert!(body.contains("per-asset cap"), "{body}");
     drop(child);
 
+    // resume wiring: no web run exists yet, so --resume refuses honestly
+    let out = bin()
+        .args(["web", "--out", perim.to_str().unwrap(), "--resume"])
+        .output()
+        .expect("web resume launches");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "nothing to resume must refuse: {stderr}"
+    );
+    assert!(stderr.contains("nothing to resume"), "{stderr}");
+
+    // the threads contract: outside 1..=32 bails before anything spawns
+    for bad in ["0", "33"] {
+        let out = bin()
+            .args(["web", "--out", perim.to_str().unwrap(), "--threads", bad])
+            .output()
+            .expect("web launches");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!("--threads: {bad} - 1..=32")),
+            "--threads {bad} must refuse: {stderr}"
+        );
+    }
+
+    // one live target among the wall: its screenshot seeds the digest map
+    // the resume will dedupe against
+    serve_cap_page(47000);
+    let fake_chrome = root.join("fake-chrome");
+    fs::write(&fake_chrome, FAKE_CHROME).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_chrome, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let argv_dump = root.join("fake-chrome-cap.argv");
     let out = bin()
         .args(["web", "--out", perim.to_str().unwrap(), "--threads", "8"])
+        .env("RUSTRAWL_CHROME_BIN", &fake_chrome)
+        .env("FAKE_CHROME_ARGV", &argv_dump)
         .output()
         .expect("web launches");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1784,25 +1807,16 @@ fn capture_pass_has_no_target_cap_and_per_asset_stays_bounded() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("50/530, "),
-        "progress rides stderr: {stderr}"
+        stderr.contains("1/530 target(s) captured, 529 failed"),
+        "the live listener captures, the wall refuses: {stderr}"
     );
-    assert!(
-        stderr.contains("0/530 target(s) captured, 530 failed"),
-        "{stderr}"
-    );
-
-    // resume: every target failed conn-level, so the pass re-shoots all
-    // 530 into the same run - still no cap, still exactly one run dir
-    let out = bin()
-        .args(["web", "--out", perim.to_str().unwrap(), "--resume"])
-        .output()
-        .expect("web resume launches");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("resuming 530 of 530 target(s) (0 captured)"),
-        "failed targets are retried: {stderr}"
+    // exactly one progress tick per 50 completions: 50..500 over 530
+    // targets - each tick echoes the run.log line (`progress: ...`) and a
+    // console line (`web <run>: ...`) to stderr
+    assert_eq!(
+        stderr.matches("progress: ").count(),
+        10,
+        "progress rides stderr every 50 completions: {stderr}"
     );
     let runs: Vec<String> = fs::read_dir(perim.join("runs"))
         .unwrap()
@@ -1811,6 +1825,74 @@ fn capture_pass_has_no_target_cap_and_per_asset_stays_bounded() {
         .filter(|n| n.starts_with("web_"))
         .collect();
     assert_eq!(runs.len(), 1, "{runs:?}");
+    let run_dir = perim.join("runs").join(&runs[0]);
+    let run_log = fs::read_to_string(run_dir.join("run.log")).unwrap_or_default();
+    assert_eq!(
+        run_log.matches("progress: ").count(),
+        10,
+        "the run.log mirrors the progress lines"
+    );
+    let shots: Vec<String> = fs::read_dir(run_dir.join("shots"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(shots.len(), 1, "one canonical screenshot: {shots:?}");
+
+    // resume: the wall is retried conn-level (never a chromium spawn) and
+    // one more live listener now captures INTO the resumed pass - its
+    // identical PNG collides with pass 1's digest, pinning that the
+    // rebuilt digest map really dedupes across the resume boundary
+    serve_cap_page(47001);
+    let out = bin()
+        .args(["web", "--out", perim.to_str().unwrap(), "--resume"])
+        .env("RUSTRAWL_CHROME_BIN", &fake_chrome)
+        .env("FAKE_CHROME_ARGV", &argv_dump)
+        .output()
+        .expect("web resume launches");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("resuming 529 of 530 target(s) (1 captured)"),
+        "failed targets are retried: {stderr}"
+    );
+    assert!(
+        stderr.contains("2/530 target(s) captured, 528 failed, 1 duplicate screenshot(s)"),
+        "the resumed shot dedupes against pass 1: {stderr}"
+    );
+    // exactly two chromium spawns across both invocations: 47000 in pass 1
+    // and 47001 in the resume (the argv ends in the target url) - the 528
+    // conn-level retries never reach the browser
+    let argv = fs::read_to_string(&argv_dump).unwrap();
+    assert_eq!(
+        argv.matches("--screenshot=").count(),
+        2,
+        "only the two live targets spawn chromium: {argv:?}"
+    );
+    assert!(
+        argv.lines().any(|l| l == "http://127.0.0.2:47000/")
+            && argv.lines().any(|l| l == "http://127.0.0.2:47001/"),
+        "{argv:?}"
+    );
+    let manifest = fs::read_to_string(run_dir.join("targets.jsonl")).unwrap();
+    assert_eq!(
+        manifest.lines().count(),
+        530 + 529,
+        "530 pass rows + 529 retry rows"
+    );
+    assert!(
+        manifest
+            .lines()
+            .any(|l| l.contains("\"dup_of\":\"http://127.0.0.2:47000/\"")),
+        "the resumed target is a duplicate of pass 1's canonical shot"
+    );
+    let runs: Vec<String> = fs::read_dir(perim.join("runs"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("web_"))
+        .collect();
+    assert_eq!(runs.len(), 1, "a resume never opens a second run: {runs:?}");
     fs::remove_dir_all(&root).ok();
 }
 
