@@ -462,8 +462,8 @@ fn web_dashboard_serves_the_registry_over_http() {
     // the row's prefix, and the sheet's two tables sort on their own state
     // without crashing on each other's columns
     for key in [
-        "filterBar(\"bar-services\", \"/services\", \"search\", renderServices)",
-        "filterBar(\"bar-hosts\", \"/hosts\", \"search\", renderHosts)",
+        "filterBar(\"bar-services\", \"/services\", \"search\", refilter)",
+        "filterBar(\"bar-hosts\", \"/hosts\", \"search\", refilter)",
         "() => rangePrefix === 24 ? \"\" : \"p\" + rangePrefix",
         "Math.min(4, Math.ceil(p / 8))",
         "sortState",
@@ -1632,7 +1632,16 @@ fn capture_pass_shoots_the_registry_web_services() {
         "capquiet",
         "rustrawl-show-services",
         "rustrawl-show-hosts",
-        " - showing ",
+        // a set bigger than one page paginates instead of cutting
+        " - page ",
+        "pager-label",
+        // the pager re-renders through the render fn itself: wired to a
+        // refilter wrapper it resets the page to 1 and next/last no-op
+        "pager(bar, \"services\", pages, renderServices)",
+        "pager(bar, \"hosts\", pages, renderHosts)",
+        // without this rule the author display:inline-flex beats the UA
+        // [hidden] cascade and a single-page pager stays visible
+        ".pager[hidden] { display: none; }",
         "-port:22",
         // the cap select borrows the dropdown's look through the .limit
         // class, and the sheet's re-render stands down once the operator

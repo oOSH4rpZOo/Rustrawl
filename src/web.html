@@ -102,6 +102,11 @@
     font-size: 13px; min-width: 260px;
   }
   .count { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  .pager { display: inline-flex; gap: 4px; align-items: center; }
+  /* The author display rule beats the UA `[hidden] { display: none }` in
+     the cascade, so hiding needs its own rule. */
+  .pager[hidden] { display: none; }
+  .pager .pager-label { min-width: 9ch; text-align: center; }
   .dim { color: var(--dim); }
   .empty { color: var(--dim); font-family: var(--mono); padding: 26px 0; }
   /* The multi-port picker: a bar button that opens a checkbox panel over
@@ -549,11 +554,12 @@ let rescanTimer = null, rescanInFlight = false, rescanCmd = "";
 // button read these, so a filter leaving 10 rows exports those 10.
 let displayedSvc = [], displayedHosts = [];
 
-// The per-tab display cap: how many table rows a view draws (10/100/1000/all).
+// The per-tab page size: how many table rows one page draws (10/100/1000/all).
 // It caps the TABLE only - exports and the rescan queue button keep the full
-// filtered set, and the count line says "showing N" when the cap bites.
-// Persisted per tab like the rescan queue; a stale or junk value falls back
-// to "all".
+// filtered set - and a set bigger than one page paginates: a pager rides the
+// bar (first/prev/next/last) and the count line says "page X/Y" when it
+// bites. Persisted per tab like the rescan queue; a stale or junk value
+// falls back to "all".
 const SHOW_CHOICES = [10, 100, 1000, "all"];
 const SHOW_KEYS = { services: "rustrawl-show-services", hosts: "rustrawl-show-hosts" };
 function loadShow(key) {
@@ -567,6 +573,11 @@ function saveShow(key, v) {
 }
 let showSvc = loadShow(SHOW_KEYS.services);
 let showHosts = loadShow(SHOW_KEYS.hosts);
+// The pager page per tab (1-based): where the capped table sits. The size
+// select, the search and the port picks reset it to 1, every render clamps
+// it, a sort keeps it. It is session state on purpose - a page number has
+// no meaning across visits, unlike the size.
+let capPages = { services: 1, hosts: 1 };
 
 // The port picks: one set per tab, persisted like the display caps. An
 // empty set means no port filter at all.
@@ -1220,6 +1231,46 @@ function limitSelect(bar, get, set) {
   return sel;
 }
 
+// The pager for a capped table: built once per bar (it rides the cached
+// bar like the limit select, right after the count line) and re-synced each
+// render, hidden on a single page. `pages` arrives already computed and the
+// page already clamped by the render; the buttons write capPages[view] and
+// re-render. `all` never reaches here as a multi-page case (one page).
+// `rerender` must be the render fn itself, never a refilter wrapper: a
+// wrapper resets the page to 1 after go() wrote it, so next/last no-op.
+function pager(bar, view, pages, rerender) {
+  let wrap = bar.querySelector(".pager");
+  if (!wrap) {
+    wrap = el("span", null, "pager");
+    const mk = (label, title) => {
+      const b = el("button", label, "chipbtn pager-btn");
+      b.type = "button";
+      b.title = title;
+      wrap.appendChild(b);
+      return b;
+    };
+    mk("«", "first page");
+    mk("‹", "previous page");
+    wrap.appendChild(el("span", "", "dim pager-label"));
+    mk("›", "next page");
+    mk("»", "last page");
+    bar.querySelector(".count").after(wrap);
+  }
+  const [first, prev, next, last] = wrap.querySelectorAll("button");
+  const go = p => { capPages[view] = p; rerender(); };
+  first.onclick = () => go(1);
+  prev.onclick = () => go(capPages[view] - 1);
+  next.onclick = () => go(capPages[view] + 1);
+  last.onclick = () => go(pages);
+  wrap.hidden = pages <= 1;
+  wrap.querySelector(".pager-label").textContent = `page ${capPages[view]}/${pages}`;
+  const back = capPages[view] > 1, more = capPages[view] < pages;
+  first.disabled = !back;
+  prev.disabled = !back;
+  next.disabled = !more;
+  last.disabled = !more;
+}
+
 // The multi-port picker, built once per bar (it rides the cached bar like
 // the limit select and the hide-empty switch) and re-synced each render:
 // the checkbox list redraws only when the data's port set changed, so an
@@ -1786,11 +1837,13 @@ async function renderServices() {
   const rows = selPorts.services.size
     ? prePort.filter(r => selPorts.services.has(r.port))
     : prePort;
-  const bar = filterBar("bar-services", "/services", "search", renderServices);
+  // Any narrowing (search, port picks, page size) restarts at page 1.
+  const refilter = () => { capPages.services = 1; renderServices(); };
+  const bar = filterBar("bar-services", "/services", "search", refilter);
   const input = bar.querySelector("input");
   if (document.activeElement !== input) input.value = filter;
-  limitSelect(bar, () => showSvc, v => { showSvc = v; saveShow(SHOW_KEYS.services, v); renderServices(); });
-  portSelect(bar, "services", () => prePort.map(r => r.port), renderServices);
+  limitSelect(bar, () => showSvc, v => { showSvc = v; saveShow(SHOW_KEYS.services, v); refilter(); });
+  portSelect(bar, "services", () => prePort.map(r => r.port), refilter);
   const cols = [
     { key: "ip", label: "host" },
     { key: "port", label: "port", numeric: true, render: (v, r) => portBadge(r.ip, r.port, r.name) },
@@ -1802,9 +1855,17 @@ async function renderServices() {
   // exactly these rows, the rescan button queues exactly their hosts - the
   // display cap cuts only what the table below draws, never this set.
   displayedSvc = sortedRows(cols, rows, "services");
-  const shown = showSvc === "all" ? displayedSvc : displayedSvc.slice(0, showSvc);
+  // One page of showSvc rows over the full filtered set ("all" = one page).
+  // The page is clamped here: the set may have shrunk since the last render
+  // (a data refresh behind an open tab). Sorting keeps the page on purpose.
+  const size = showSvc === "all" ? displayedSvc.length || 1 : showSvc;
+  const pages = Math.max(1, Math.ceil(displayedSvc.length / size));
+  capPages.services = Math.min(Math.max(1, capPages.services), pages);
+  const start = (capPages.services - 1) * size;
+  const shown = displayedSvc.slice(start, start + size);
   bar.querySelector(".count").textContent = `${rows.length} row(s) of ${data.count}` +
-    (shown.length < rows.length ? ` - showing ${shown.length}` : "");
+    (pages > 1 ? ` - page ${capPages.services}/${pages}` : "");
+  pager(bar, "services", pages, renderServices);
   // Exports on the right end of the bar: the rows as displayed in three
   // serializations, or those hosts' nmap XML from the registry.
   const xname = ext => "rustrawl-services-" + (filterSlug() || "displayed") + "." + ext;
@@ -1849,7 +1910,9 @@ async function renderHosts() {
     // top of this order)
     .sort((a, b) => (b.pwned ? 1 : 0) - (a.pwned ? 1 : 0)
       || a.ip.localeCompare(b.ip));
-  const bar = filterBar("bar-hosts", "/hosts", "search", renderHosts);
+  // Any narrowing (search, port picks, page size) restarts at page 1.
+  const refilter = () => { capPages.hosts = 1; renderHosts(); };
+  const bar = filterBar("bar-hosts", "/hosts", "search", refilter);
   const input = bar.querySelector("input");
   if (document.activeElement !== input) input.value = filter;
   // What the checkbox took out for THIS filter - said out loud when the
@@ -1861,18 +1924,18 @@ async function renderHosts() {
     hw = el("label", null, "hidewh");
     const cb = el("input");
     cb.type = "checkbox";
-    cb.onchange = () => { hideNoPort = cb.checked; renderHosts(); };
+    cb.onchange = () => { hideNoPort = cb.checked; refilter(); };
     hw.appendChild(cb);
     hw.appendChild(el("span", "hide hosts without open ports"));
     bar.insertBefore(hw, bar.querySelector(".count"));
   }
   hw.querySelector("input").checked = hideNoPort;
-  limitSelect(bar, () => showHosts, v => { showHosts = v; saveShow(SHOW_KEYS.hosts, v); renderHosts(); });
+  limitSelect(bar, () => showHosts, v => { showHosts = v; saveShow(SHOW_KEYS.hosts, v); refilter(); });
   portSelect(bar, "hosts", () => {
     const s = new Set();
     prePort.forEach(r => (r.ports ?? []).forEach(p => s.add(p)));
     return [...s];
-  }, renderHosts);
+  }, refilter);
   const cols = [
     { key: "pwned", label: "pw3nd", val: r => (r.pwned ? 0 : 1),
       render: (v, r) => pwnedDot(r.ip, !!r.pwned) },
@@ -1904,10 +1967,17 @@ async function renderHosts() {
   // display cap cuts only what the table below draws, never this set.
   const sorted = sortedRows(cols, rows, "hosts");
   displayedHosts = sorted.map(r => r.ip);
-  const shown = showHosts === "all" ? sorted : sorted.slice(0, showHosts);
+  // One page of showHosts rows over the full filtered set ("all" = one
+  // page); clamped and kept on sort, same contract as the services view.
+  const size = showHosts === "all" ? sorted.length || 1 : showHosts;
+  const pages = Math.max(1, Math.ceil(sorted.length / size));
+  capPages.hosts = Math.min(Math.max(1, capPages.hosts), pages);
+  const start = (capPages.hosts - 1) * size;
+  const shown = sorted.slice(start, start + size);
   bar.querySelector(".count").textContent =
     `${rows.length} host(s) of ${data.count}` + (hidden ? ` (${hidden} hidden)` : "") +
-    (shown.length < rows.length ? ` - showing ${shown.length}` : "");
+    (pages > 1 ? ` - page ${capPages.hosts}/${pages}` : "");
+  pager(bar, "hosts", pages, renderHosts);
   const xname = ext => "rustrawl-hosts-" + (filterSlug() || "displayed") + "." + ext;
   exportSelect(bar, [
     ["txt", () => postExport("/api/export/hosts.txt",
